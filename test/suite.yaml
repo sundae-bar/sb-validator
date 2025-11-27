@@ -1,0 +1,27 @@
+name: ascii-art-rubric-test
+description: Test if agent can generate ASCII art correctly using rubric grading
+dataset: dataset.csv
+max_samples: 3
+target:
+  kind: letta_agent
+  agent_file: agent.af
+  base_url: http://localhost:8283
+graders:
+  quality:
+    kind: model_judge
+    display_name: "rubric score"
+    prompt_path: rubric.txt
+    model: gpt-4o-mini
+    temperature: 0.0
+    provider: openai
+    max_retries: 3
+    timeout: 120.0
+    extractor: last_assistant
+    rubric_vars:
+      - reference_ascii
+gate:
+  kind: simple
+  metric_key: quality
+  aggregation: avg_score  # Add this line from the docs example
+  op: gte
+  value: 0.6
