@@ -1,0 +1,15 @@
+services:
+  letta:
+    image: letta/letta:latest
+    container_name: letta-server
+    restart: unless-stopped
+    ports:
+      - "8283:8283"
+    env_file:
+      - .env
+    volumes:
+      - letta-pgdata:/var/lib/postgresql/data
+
+volumes:
+  letta-pgdata:
+    driver: local

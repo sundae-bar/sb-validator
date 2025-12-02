@@ -137,8 +137,7 @@ export class Validator {
       {
         taskId: task.id,
         briefId: task.brief_id,
-        status: task.status,
-        suite_name: task.task_payload.suite_config.name
+        status: task.status
       },
       'Processing task'
     );

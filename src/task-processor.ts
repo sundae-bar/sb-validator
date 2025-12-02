@@ -78,33 +78,6 @@ export class TaskProcessor {
   async processTask(task: Task): Promise<void> {
     const taskId = task.id;
     const taskPayload = task.task_payload;
-    
-    // Log the dataset field to see what we're receiving
-    if (taskPayload.suite_config?.dataset) {
-      // Check top-level dataset first, then fall back to suite_config.dataset
-      const dataset = (taskPayload as any).dataset || taskPayload.suite_config.dataset;
-      logger.info(
-        {
-          taskId: task.id,
-          datasetType: typeof dataset,
-          datasetIsString: typeof dataset === 'string',
-          datasetStartsWith: typeof dataset === 'string' ? dataset.substring(0, 50) : 'not a string',
-          datasetLength: typeof dataset === 'string' ? dataset.length : 0,
-          hasBase64Prefix: typeof dataset === 'string' && dataset.startsWith('base64:')
-        },
-        'Received dataset in task payload'
-      );
-    }
-
-    logger.info(
-      { 
-        taskId, 
-        briefId: task.brief_id,
-        status: task.status,
-        suiteName: taskPayload.suite_config.name
-      },
-      'Starting task processing'
-    );
 
     // In-memory check: skip if already processing
     if (this.isProcessing(taskId)) {
@@ -215,15 +188,21 @@ export class TaskProcessor {
 
       throw error;
     } finally {
-      // Cleanup: remove temp files
-      try {
-        const taskWorkDir = path.join(this.workDir, taskId);
-        await this.cleanup(taskWorkDir);
-      } catch (cleanupError) {
-        logger.warn(
-          { taskId, error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) },
-          'Failed to cleanup task files'
-        );
+      // Cleanup: remove temp files (can be disabled via KEEP_TASK_FILES=1 for debugging)
+      let keepTaskFiles = process.env.KEEP_TASK_FILES === '1';
+      keepTaskFiles = true;
+      if (!keepTaskFiles) {
+        try {
+          const taskWorkDir = path.join(this.workDir, taskId);
+          await this.cleanup(taskWorkDir);
+        } catch (cleanupError) {
+          logger.warn(
+            { taskId, error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) },
+            'Failed to cleanup task files'
+          );
+        }
+      } else {
+        logger.info({ taskId, workDir: path.join(this.workDir, taskId) }, 'KEEP_TASK_FILES=1 set, skipping cleanup of task workDir');
       }
 
       // Unmark processing (in-memory)
@@ -358,49 +337,22 @@ export class TaskProcessor {
    */
   private async downloadFile(urlOrBase64: string): Promise<string> {
     if (urlOrBase64.startsWith('http://') || urlOrBase64.startsWith('https://')) {
-      const response = await fetch(urlOrBase64);
+      const response = await fetch(urlOrBase64, {
+        cache: 'no-store',
+        headers: {
+          'Cache-Control': 'no-store',
+          'Pragma': 'no-cache',
+          'Expires': '0'
+        }
+      });
       if (!response.ok) {
         throw new Error(`Failed to download file: ${response.status} ${response.statusText}`);
       }
       const content = await response.text();
-      
-      // LOG THE RAW DOWNLOADED CONTENT
-      const firstLine = content.split('\n')[0];
-      logger.info({
-        url: urlOrBase64,
-        contentLength: content.length,
-        firstLineLength: firstLine?.length,
-        firstLineRaw: firstLine?.substring(0, 300),
-        firstLineStartsWith: firstLine?.substring(0, 50)
-      }, 'Downloaded file from URL - RAW content');
-      
-      // Try parsing if it looks like JSON
-      if (firstLine?.trim().startsWith('{')) {
-        try {
-          const parsed = JSON.parse(firstLine.trim());
-          logger.info({
-            parsedType: typeof parsed,
-            hasInput: typeof parsed === 'object' && 'input' in parsed,
-            keys: typeof parsed === 'object' && parsed !== null ? Object.keys(parsed) : 'N/A'
-          }, 'First line parsed successfully');
-        } catch (e) {
-          logger.warn({ error: e instanceof Error ? e.message : String(e) }, 'Could not parse first line');
-        }
-      }
-      
       return content;
     } else if (urlOrBase64.startsWith('base64:')) {
       const base64Data = urlOrBase64.substring(7);
       const content = Buffer.from(base64Data, 'base64').toString('utf-8');
-      
-      // LOG THE DECODED CONTENT
-      const firstLine = content.split('\n')[0];
-      logger.info({
-        base64Length: base64Data.length,
-        contentLength: content.length,
-        firstLineRaw: firstLine?.substring(0, 300)
-      }, 'Decoded file from base64');
-      
       return content;
     } else {
       return Buffer.from(urlOrBase64, 'base64').toString('utf-8');
@@ -483,24 +435,31 @@ export class TaskProcessor {
       const agentContent = await this.downloadFile(taskPayload.agent_file);
       agentFilePath = path.join(workDir, agentFileName);
       await fs.writeFile(agentFilePath, agentContent, 'utf-8');
-      logger.info({ agentFilePath }, 'Downloaded agent file');
+      
+      // Log where the agent file is and a truncated preview of its contents
+      // This helps debug exactly what is being sent to Letta via letta-evals
+      const previewLength = 2000; // Prevent logging extremely large files
+      const agentPreview = agentContent.substring(0, previewLength);
+      
+      logger.info(
+        {
+          agentFilePath,
+          previewLength: agentContent.length,
+          previewTruncated: agentContent.length > previewLength,
+          agentPreview
+        },
+        'Downloaded agent file (preview)'
+      );
     }
 
     // Download and write dataset
     let datasetPath: string | undefined;
-    const dataset = (taskPayload as any).dataset || taskPayload.suite_config.dataset;
+    const dataset = taskPayload.dataset;
     
     if (dataset) {
       if (dataset.startsWith('http://') || dataset.startsWith('https://') || dataset.startsWith('base64:')) {
         // Download from URL or decode from base64
         const datasetContent = await this.downloadFile(dataset);
-
-        // LOG BEFORE CSV CHECK
-        logger.info({
-          contentLength: datasetContent.length,
-          firstLineRaw: datasetContent.split('\n')[0]?.substring(0, 300),
-          isCsv: this.isCsvContent(datasetContent)
-        }, 'Dataset content BEFORE CSV conversion');
 
         datasetPath = path.join(workDir, 'dataset.jsonl');
         
@@ -509,12 +468,6 @@ export class TaskProcessor {
         if (this.isCsvContent(datasetContent)) {
           finalContent = this.csvToJsonl(datasetContent);
         }
-
-        // LOG BEFORE WRITE
-        logger.info({
-          finalContentLength: finalContent.length,
-          firstLineRaw: finalContent.split('\n')[0]?.substring(0, 300)
-        }, 'About to write dataset file');
         
         await fs.writeFile(datasetPath, finalContent, 'utf-8');
         try {
@@ -573,107 +526,52 @@ export class TaskProcessor {
       logger.info({ rubricPath }, 'Created default rubric file');
     }
 
-    // Add default grader if missing (required by letta-evals)
-    let graders = taskPayload.suite_config.graders;
-    if (!graders || 
-        typeof graders !== 'object' ||
-        Object.keys(graders).length === 0) {
-      logger.info('No graders provided, adding default model_judge grader');
-      graders = {
-        quality: {
-          kind: 'model_judge',
-          display_name: 'Quality Score',
-          extractor: 'last_assistant',
-          prompt_path: 'rubric.txt',
-        },
-      };
-    }
-
-    // Add default gate if missing (required by letta-evals)
-    // Use the first grader's key as the metric_key
-    const firstGraderKey = Object.keys(graders)[0] || 'quality';
-    const gate = taskPayload.suite_config.gate || {
-      metric_key: firstGraderKey,
-      op: 'gte',
-      value: 0.0, // Default to passing all (no minimum threshold)
-    };
-
     // Override base_url to use validator's configured Letta server
     let targetBaseUrl: string | undefined;
     if (process.env.LETTA_BASE_URL) {
       targetBaseUrl = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
     } else if (process.env.LETTA_API_KEY) {
       targetBaseUrl = 'https://api.letta.com';
-    } else {
-      targetBaseUrl = taskPayload.suite_config.target.base_url;
     }
     
     if (targetBaseUrl && !targetBaseUrl.startsWith('http://') && !targetBaseUrl.startsWith('https://')) {
       throw new Error(`Invalid base_url: "${targetBaseUrl}" - must start with http:// or https://`);
     }
 
-    // Create suite.yaml - use provided suite_yaml if available, otherwise generate from suite_config
+    // Create suite.yaml from provided suite_yaml file
     const suitePath = path.join(workDir, 'suite.yaml');
     
-    if (taskPayload.suite_yaml && typeof taskPayload.suite_yaml === 'string') {
-      // Use provided suite.yaml file, but override base_url and ensure dataset path is correct
-      const suiteYamlContent = await this.downloadFile(taskPayload.suite_yaml);
-      let suiteConfig = yaml.load(suiteYamlContent) as any;
-      
-      if (!suiteConfig) {
-        throw new Error('Failed to parse provided suite.yaml file');
-      }
-      
-      // Update dataset path to point to the local file if dataset was written
-      if (datasetPath) {
-        suiteConfig.dataset = path.basename(datasetPath);
-      }
-      
-      // Update target.base_url and agent_file
-      if (!suiteConfig.target) {
-        suiteConfig.target = {};
-      }
-      if (targetBaseUrl) {
-        suiteConfig.target.base_url = targetBaseUrl;
-      }
-      if (agentFilePath) {
-        suiteConfig.target.agent_file = path.basename(agentFilePath);
-      }
-      
-      const updatedYamlContent = yaml.dump(suiteConfig);
-      await fs.writeFile(suitePath, updatedYamlContent, 'utf-8');
-      logger.info({ suitePath }, 'Updated provided suite.yaml');
-    } else {
-      // Generate suite.yaml from suite_config
-      const suiteConfig = {
-        name: taskPayload.suite_config.name,
-        dataset: datasetPath ? path.basename(datasetPath) : taskPayload.suite_config.dataset,
-        max_samples: taskPayload.suite_config.max_samples,
-        target: {
-          ...taskPayload.suite_config.target,
-          ...(agentFilePath ? { agent_file: path.basename(agentFilePath) } : {}),
-          ...(targetBaseUrl ? { base_url: targetBaseUrl } : {})
-        },
-        graders,
-        gate,
-      };
-
-      // Add rubric path to graders if rubric file exists
-      if (rubricPath && suiteConfig.graders) {
-        for (const [key, grader] of Object.entries(suiteConfig.graders)) {
-          if (typeof grader === 'object' && grader !== null && 'kind' in grader) {
-            const graderObj = grader as any;
-            if (graderObj.kind === 'model_judge' && !graderObj.prompt_path) {
-              graderObj.prompt_path = 'rubric.txt';
-            }
-          }
-        }
-      }
-
-      const suiteYaml = this.generateSuiteYaml(suiteConfig);
-      await fs.writeFile(suitePath, suiteYaml, 'utf-8');
-      logger.info({ suitePath }, 'Generated suite.yaml');
+    if (!taskPayload.suite_yaml || typeof taskPayload.suite_yaml !== 'string') {
+      throw new Error('suite_yaml is required but was not provided in task payload');
     }
+
+    // Use provided suite.yaml file, but override base_url and ensure dataset path is correct
+    const suiteYamlContent = await this.downloadFile(taskPayload.suite_yaml);
+    let suiteConfig = yaml.load(suiteYamlContent) as any;
+    
+    if (!suiteConfig) {
+      throw new Error('Failed to parse provided suite.yaml file');
+    }
+    
+    // Update dataset path to point to the local file if dataset was written
+    if (datasetPath) {
+      suiteConfig.dataset = path.basename(datasetPath);
+    }
+    
+    // Update target.base_url and agent_file
+    if (!suiteConfig.target) {
+      suiteConfig.target = {};
+    }
+    if (targetBaseUrl) {
+      suiteConfig.target.base_url = targetBaseUrl;
+    }
+    if (agentFilePath) {
+      suiteConfig.target.agent_file = path.basename(agentFilePath);
+    }
+    
+    const updatedYamlContent = yaml.dump(suiteConfig);
+    await fs.writeFile(suitePath, updatedYamlContent, 'utf-8');
+    logger.info({ suitePath }, 'Updated provided suite.yaml');
 
     return {
       suitePath,
@@ -686,80 +584,6 @@ export class TaskProcessor {
   /**
    * Generate suite.yaml content from config
    */
-  private generateSuiteYaml(config: any): string {
-    // Build YAML object
-    const yamlObj: any = {
-      name: config.name
-    };
-
-    if (config.dataset) {
-      // Use relative path if it's a local file
-      yamlObj.dataset = typeof config.dataset === 'string' && 
-        (config.dataset.startsWith('http://') || config.dataset.startsWith('https://') || config.dataset.includes('/'))
-        ? config.dataset
-        : 'dataset.jsonl';
-    }
-
-    yamlObj.graders_module = 'grader_lib.py';
-
-    if (config.max_samples) {
-      yamlObj.max_samples = config.max_samples;
-    }
-
-    // Transform target kind: 'agent' -> 'letta_agent' for compatibility
-    let targetKind = config.target.kind;
-    if (targetKind === 'agent') {
-      targetKind = 'letta_agent';
-    }
-
-    yamlObj.target = {
-      kind: targetKind
-    };
-
-    if (config.target.agent_file) {
-      yamlObj.target.agent_file = config.target.agent_file;
-    }
-    if (config.target.base_url) {
-      yamlObj.target.base_url = config.target.base_url;
-    }
-
-    // Graders are required by letta-evals (should already be set by prepareFiles, but double-check)
-    if (!config.graders || Object.keys(config.graders).length === 0) {
-      throw new Error('Suite config must define at least one grader (this should not happen - default grader should have been added)');
-    }
-    yamlObj.graders = config.graders;
-
-    // Gate should always be present (set in prepareFiles)
-    // Add kind and aggregation for letta-evals format
-    if (config.gate) {
-      yamlObj.gate = {
-        kind: 'simple',
-        aggregation: 'avg_score',
-        ...config.gate, // metric_key, op, value from config
-      };
-    } else {
-      // Fallback (should not happen, but just in case)
-      const firstGraderKey = config.graders && Object.keys(config.graders).length > 0
-        ? Object.keys(config.graders)[0]
-        : 'quality';
-      
-      yamlObj.gate = {
-        kind: 'simple',
-        metric_key: firstGraderKey,
-        aggregation: 'avg_score',
-        op: 'gte',
-        value: 0.0,
-      };
-    }
-
-    return yaml.dump(yamlObj, { 
-      lineWidth: -1, // No line wrapping
-      quotingType: '"',
-      forceQuotes: false,
-      noRefs: true,
-      sortKeys: false
-    });
-  }
 
   /**
    * Run letta-evals evaluation
@@ -801,10 +625,6 @@ export class TaskProcessor {
           if (stats.size === 0) {
             throw new Error(`Dataset file is empty: ${datasetPath}`);
           }
-          logger.info(
-            { datasetPath, size: stats.size, suiteDataset: suiteConfig.dataset },
-            'Dataset file verified before running letta-evals'
-          );
         } catch (error) {
           logger.error(
             { 
@@ -860,10 +680,10 @@ export class TaskProcessor {
       
       throw new Error(`Suite validation failed: ${validateMessage}${validateStderr ? '\n' + validateStderr : ''}`);
     }
-    
-    // Now run the evaluation
-    const cmd = `${pythonCmd} -m ${cliModule} run "${suiteFile}" --output "${outputDir}"`;
-    logger.info({ cmd, cwd: suiteDir, outputDir }, 'Running letta-evals');
+
+    // Now run the evaluation with custom graders using wrapper script
+    const cmd = `${pythonCmd} /app/python/run_with_graders.py run "${suiteFile}" --output "${outputDir}"`;
+    logger.info({ cmd, cwd: suiteDir, outputDir }, 'Running letta-evals with custom graders');
 
     try {
       // Prepare environment variables for letta-evals
@@ -912,9 +732,9 @@ export class TaskProcessor {
       });
 
       // Log stdout for debugging (letta-evals may output progress info here)
-      if (stdout) {
-        logger.info({ stdout }, 'letta-evals stdout output');
-      }
+      // if (stdout) {
+      //   logger.info({ stdout }, 'letta-evals stdout output');
+      // }
 
       if (stderr) {
         logger.warn({ stderr }, 'letta-evals stderr output');
@@ -1080,6 +900,23 @@ export class TaskProcessor {
 
       const artifacts: Record<string, string> = {};
 
+      // Read suite.yaml to get grader weights for weighted average calculation
+      let graderWeights: Record<string, number> = {};
+      try {
+        const suiteYamlContent = await fs.readFile(suitePath, 'utf-8');
+        const suiteConfig = yaml.load(suiteYamlContent) as any;
+        if (suiteConfig?.graders && typeof suiteConfig.graders === 'object') {
+          for (const [graderName, graderConfig] of Object.entries(suiteConfig.graders)) {
+            const grader = graderConfig as { weight?: number; [key: string]: unknown };
+            if (typeof grader.weight === 'number') {
+              graderWeights[graderName] = grader.weight;
+            }
+          }
+        }
+      } catch (error) {
+        logger.debug({ error, suitePath }, 'Could not read suite.yaml for grader weights');
+      }
+
       // Process results: round scores and add performance metrics
       const processedResults = results.map((result: unknown) => {
         if (typeof result !== 'object' || result === null) return result;
@@ -1094,12 +931,6 @@ export class TaskProcessor {
           if (score === undefined || score === null) return score;
           return Math.round(score * 1000) / 1000;
         };
-        
-        // Process grade score
-        const grade = resultData.grade as { score?: number; [key: string]: unknown } | undefined;
-        if (grade && typeof grade.score === 'number') {
-          grade.score = roundScore(grade.score)!;
-        }
         
         // Process grades object (e.g., grades.quality.score)
         const grades = resultData.grades as Record<string, { score?: number; [key: string]: unknown }> | undefined;
@@ -1119,8 +950,6 @@ export class TaskProcessor {
           [key: string]: unknown;
         }> | undefined;
         
-        const gradeMetadata = grade?.metadata as { usage?: { total_tokens?: number } } | undefined;
-        
         let totalTokens = 0;
         let avgSteps = 0;
         
@@ -1138,9 +967,7 @@ export class TaskProcessor {
           }
         }
         
-        // Add grading tokens
-        // Note: grade and grades.quality may reference the same grading operation,
-        // so we count graders first, then only use grade if no graders exist
+        // Add grading tokens from all graders
         let gradingTokens = 0;
         const graderNames = grades ? Object.keys(grades) : [];
         
@@ -1155,23 +982,50 @@ export class TaskProcessor {
           }
         }
         
-        // If no graders or no tokens from graders, use grade tokens
-        // (grade is typically an aggregate, so we prefer individual grader counts)
-        if (gradingTokens === 0 && gradeMetadata?.usage?.total_tokens) {
-          gradingTokens = gradeMetadata.usage.total_tokens;
-        }
-        
         totalTokens += gradingTokens;
         
-        // Calculate token per score point
-        const score = grade?.score ?? 0;
-        const tokenPerScorePoint = score > 0 ? totalTokens / score : undefined;
+        // Calculate weighted average score from individual graders
+        let weightedScore: number | undefined = undefined;
+        if (grades && Object.keys(grades).length > 0) {
+          let totalWeight = 0;
+          let weightedSum = 0;
+          
+          for (const [graderName, grader] of Object.entries(grades)) {
+            const graderScore = grader?.score;
+            if (graderScore !== undefined && graderScore !== null) {
+              const weight = graderWeights[graderName] ?? (1 / Object.keys(grades).length); // Default to equal weight if not specified
+              weightedSum += graderScore * weight;
+              totalWeight += weight;
+            }
+          }
+          
+          if (totalWeight > 0) {
+            weightedScore = weightedSum / totalWeight;
+            weightedScore = roundScore(weightedScore);
+          }
+        }
+        
+        // Use weighted score for token calculation
+        // Note: score is 0–1, where 1 = 100%. We want "tokens per 1%" so we divide by 100.
+        // Example: if score = 0.8 and totalTokens = 8000,
+        //   tokens per 1.0 score  = 8000 / 0.8  = 10000
+        //   tokens per 1% score   = 10000 / 100 = 100
+        const score = weightedScore ?? 0;
+        const tokenPerScorePercent = score > 0 ? totalTokens / (score * 100) : undefined;
+        
+        // Store weighted score in result data for display
+        if (weightedScore !== undefined) {
+          resultData.weighted_score = weightedScore;
+        }
         
         // Add performance key
         resultData.performance = {
           total_tokens: totalTokens,
           av_tokens: totalTokens, // Average tokens per sample (this is the total for this sample)
-          token_per_score_point: tokenPerScorePoint !== undefined ? roundScore(tokenPerScorePoint) : undefined,
+          // Tokens per 1 percentage point of score (2 decimal places stored)
+          token_per_score_point: tokenPerScorePercent !== undefined
+            ? Math.round(tokenPerScorePercent * 100) / 100
+            : undefined,
           av_steps: roundScore(avgSteps) || 0
         };
         
@@ -1194,11 +1048,13 @@ export class TaskProcessor {
           const processedMetrics = { ...metrics };
           
           // Round avg_score_total
+          // Note: avg_score_total from letta-evals should be calculated using grader weights from suite.yaml
           if (typeof processedMetrics.avg_score_total === 'number') {
             processedMetrics.avg_score_total = roundScore(processedMetrics.avg_score_total)!;
           }
           
           // Round avg_score_attempted
+          // Note: avg_score_attempted from letta-evals should be calculated using grader weights from suite.yaml
           if (typeof processedMetrics.avg_score_attempted === 'number') {
             processedMetrics.avg_score_attempted = roundScore(processedMetrics.avg_score_attempted)!;
           }
@@ -1235,6 +1091,9 @@ export class TaskProcessor {
       // Clean up MCP servers before returning
       await this.cleanupMcpServers(suiteDir);
 
+      // Display results and summary in console (with ticker tape effect)
+      await this.displayEvaluationResults(processedResults, processedSummary);
+
       return {
         summary: processedSummary,
         results: processedResults,
@@ -1268,26 +1127,245 @@ export class TaskProcessor {
   }
 
   /**
+   * Sleep helper for delays
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Display evaluation results and summary in a formatted console output
+   * Outputs results one at a time with delays for ticker tape effect
+   */
+  private async displayEvaluationResults(
+    results: unknown[],
+    summary: unknown,
+    delayMs: number = 800
+  ): Promise<void> {
+    console.log('\n' + '='.repeat(70));
+    console.log('  EVALUATION RESULTS');
+    console.log('='.repeat(70) + '\n');
+
+    // Collect weighted scores to calculate our own average for verification
+    const weightedScores: number[] = [];
+
+    // Display each result with delay
+    if (results && Array.isArray(results) && results.length > 0) {
+      for (let index = 0; index < results.length; index++) {
+        const result = results[index];
+        if (typeof result !== 'object' || result === null) continue;
+        
+        const resultObj = result as Record<string, unknown>;
+        const resultData = resultObj.result as Record<string, unknown> | undefined;
+
+        // console.log(result);
+        
+        if (!resultData) continue;
+
+        const grades = resultData.grades as Record<string, { score?: number; [key: string]: unknown }> | undefined;
+        const performance = resultData.performance as {
+          total_tokens?: number;
+          av_steps?: number;
+          token_per_score_point?: number;
+        } | undefined;
+        const weightedScore = resultData.weighted_score as number | undefined;
+
+        const sampleId = resultData.sample_id || `Sample ${index + 1}`;
+
+        console.log(`┌─ RESULT ${index + 1}: ${sampleId}`);
+        console.log('│');
+        
+        // Display weighted average score
+        if (weightedScore !== undefined) {
+          console.log(`│  Score: ${weightedScore.toFixed(3)} (weighted avg)`);
+          weightedScores.push(weightedScore);
+        } else if (grades && Object.keys(grades).length > 0) {
+          // Fallback: calculate simple average if weights not available
+          const scores = Object.values(grades)
+            .map(g => (g as { score?: number })?.score)
+            .filter((s): s is number => typeof s === 'number');
+          if (scores.length > 0) {
+            const avgScore = scores.reduce((sum, s) => sum + s, 0) / scores.length;
+            console.log(`│  Score: ${avgScore.toFixed(3)} (avg)`);
+            weightedScores.push(avgScore);
+          }
+        }
+
+        // Individual grader scores if available
+        if (grades && Object.keys(grades).length > 0) {
+          console.log('│  Graders:');
+          for (const [graderName, grader] of Object.entries(grades)) {
+            const graderScore = grader?.score;
+            const graderRationale = grader?.rationale as string | undefined;
+            
+            if (graderScore !== undefined && graderScore !== null) {
+              console.log(`│    • ${graderName}: ${graderScore.toFixed(3)}`);
+              
+              // Display rationale if available, nicely formatted
+              if (graderRationale) {
+                // Wrap long rationales to fit within the box width (accounting for indentation)
+                const maxWidth = 60; // Max width for rationale text
+                const indent = '│      '; // Indentation for rationale lines
+                
+                // Split rationale into words and wrap
+                const words = graderRationale.split(' ');
+                let currentLine = '';
+                
+                for (const word of words) {
+                  if (currentLine.length + word.length + 1 <= maxWidth) {
+                    currentLine += (currentLine ? ' ' : '') + word;
+                  } else {
+                    if (currentLine) {
+                      console.log(`${indent}${currentLine}`);
+                    }
+                    currentLine = word;
+                  }
+                }
+                
+                // Print the last line
+                if (currentLine) {
+                  console.log(`${indent}${currentLine}`);
+                }
+              }
+            }
+          }
+        }
+
+        // Performance metrics
+        if (performance) {
+          console.log('│  Performance:');
+          if (performance.total_tokens !== undefined) {
+            console.log(`│    • Total Tokens: ${performance.total_tokens.toLocaleString()}`);
+          }
+          if (performance.av_steps !== undefined) {
+            console.log(`│    • Avg Steps: ${performance.av_steps.toFixed(2)}`);
+          }
+          if (performance.token_per_score_point !== undefined) {
+            console.log(`│    • Tokens/Score: ${performance.token_per_score_point.toFixed(2)}`);
+          }
+        }
+
+        console.log('└─\n');
+
+        // Delay before next result (except for the last one)
+        if (index < results.length - 1) {
+          await this.sleep(delayMs);
+        }
+      }
+    }
+
+    // Delay before summary
+    if (results && Array.isArray(results) && results.length > 0) {
+      await this.sleep(delayMs);
+    }
+
+    // Display summary
+    if (summary && typeof summary === 'object') {
+      const summaryObj = summary as Record<string, unknown>;
+      const metrics = summaryObj.metrics as {
+        avg_score_total?: number;
+        avg_score_attempted?: number;
+        by_metric?: Record<string, {
+          avg_score_total?: number;
+          avg_score_attempted?: number;
+        }>;
+      } | undefined;
+
+      console.log('┌─ SUMMARY');
+      console.log('│');
+      
+      // Calculate our own average of weighted scores for verification
+      let calculatedAvg: number | undefined = undefined;
+      if (weightedScores.length > 0) {
+        calculatedAvg = weightedScores.reduce((sum, s) => sum + s, 0) / weightedScores.length;
+        console.log(`│  Calculated Avg (from weighted scores): ${calculatedAvg.toFixed(3)}`);
+      }
+      
+      if (metrics) {
+        if (metrics.avg_score_total !== undefined) {
+          const lettaAvg = metrics.avg_score_total;
+          console.log(`│  AETS avg_score_total: ${lettaAvg.toFixed(3)}`);
+          
+          // Compare our calculation with letta-evals
+          if (calculatedAvg !== undefined) {
+            const diff = Math.abs(calculatedAvg - lettaAvg);
+            // if (diff < 0.001) {
+            //   console.log(`│  ✓ Match! (difference: ${diff.toFixed(6)})`);
+            // } else {
+            //   console.log(`│  ⚠ Mismatch! (difference: ${diff.toFixed(6)})`);
+            // }
+          }
+        }
+        if (metrics.avg_score_attempted !== undefined) {
+          console.log(`│  Avg Score (Attempted): ${metrics.avg_score_attempted.toFixed(3)}`);
+        }
+
+        // By metric breakdown
+        if (metrics.by_metric && typeof metrics.by_metric === 'object') {
+          const byMetric = metrics.by_metric;
+          const metricNames = Object.keys(byMetric);
+          if (metricNames.length > 0) {
+            console.log('│  By Metric:');
+            for (const metricName of metricNames) {
+              const metricData = byMetric[metricName];
+              if (metricData && typeof metricData === 'object') {
+                const total = metricData.avg_score_total;
+                const attempted = metricData.avg_score_attempted;
+                if (total !== undefined || attempted !== undefined) {
+                  const totalStr = total !== undefined ? total.toFixed(3) : 'N/A';
+                  const attemptedStr = attempted !== undefined ? attempted.toFixed(3) : 'N/A';
+                  console.log(`│    • ${metricName}: ${totalStr} (total) / ${attemptedStr} (attempted)`);
+                }
+              }
+            }
+          }
+        }
+      }
+
+      console.log('└─\n');
+    }
+
+    console.log('='.repeat(70) + '\n');
+  }
+
+  /**
    * Clean up MCP servers to prevent duplicate key errors on next run
    */
   private async cleanupMcpServers(workDir: string): Promise<void> {
     try {
       logger.info({ workDir }, 'Cleaning up MCP servers from Letta');
       
-      const cleanupScript = `
-from letta import create_client
-client = create_client()
-servers = client.list_mcp_servers()
-for server in servers:
-    try:
-        client.delete_mcp_server(server.id)
-        print(f"Deleted MCP server: {server.server_name}")
-    except Exception as e:
-        print(f"Failed to delete {server.server_name}: {e}")
-`;
+      // Use letta CLI commands instead of Python imports
+      const cleanupScript = `#!/bin/bash
+  set +e  # Don't exit on errors
+
+  # Get base URL
+  LETTA_BASE_URL="${process.env.LETTA_BASE_URL || 'http://host.docker.internal:8283'}"
+
+  # List servers and delete them using curl
+  curl -s "$LETTA_BASE_URL/v1/mcp/servers" 2>/dev/null | \
+    python3 -c "
+  import sys, json
+  try:
+      data = json.load(sys.stdin)
+      if isinstance(data, list):
+          for server in data:
+              print(server.get('id', ''))
+  except:
+      pass
+  " | while read server_id; do
+    if [ ! -z "$server_id" ]; then
+      echo "Deleting MCP server: $server_id"
+      curl -s -X DELETE "$LETTA_BASE_URL/v1/mcp/servers/$server_id" 2>&1 || true
+    fi
+  done
+
+  echo "MCP cleanup completed"
+  `;
       
-      const cleanupScriptPath = path.join(workDir, 'cleanup_mcp.py');
+      const cleanupScriptPath = path.join(workDir, 'cleanup_mcp.sh');
       await fs.writeFile(cleanupScriptPath, cleanupScript, 'utf-8');
+      await fs.chmod(cleanupScriptPath, 0o755);
       
       const env: Record<string, string> = {
         ...process.env,
@@ -1303,24 +1381,21 @@ for server in servers:
         env.LETTA_BASE_URL = process.env.LETTA_URL.trim().replace(/^["']|["']$/g, '');
       }
       
-      const { stdout, stderr } = await execAsync('python3 cleanup_mcp.py', { 
+      const { stdout, stderr } = await execAsync('./cleanup_mcp.sh', { 
         cwd: workDir,
         env,
-        maxBuffer: 1024 * 1024 // 1MB buffer
+        maxBuffer: 1024 * 1024,
+        timeout: 30000
       });
       
-      if (stdout) {
-        logger.info({ stdout }, 'MCP cleanup output');
-      }
       if (stderr) {
-        logger.warn({ stderr }, 'MCP cleanup warnings');
+        logger.debug({ stderr }, 'MCP cleanup stderr');
       }
       
-      // Clean up the script file
       try {
         await fs.unlink(cleanupScriptPath);
       } catch {
-        // Ignore cleanup errors
+        // Ignore
       }
     } catch (error) {
       logger.warn({ 

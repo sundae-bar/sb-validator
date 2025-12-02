@@ -22,27 +22,28 @@ export interface Task {
   task_payload: {
     task_id: string;
     agent_file?: string; // URL, base64 encoded, or base64: prefixed string
-    dataset?: string; // URL, base64 encoded dataset file, or base64: prefixed string (also in suite_config.dataset)
-    suite_config: {
-      name: string;
-      dataset?: string; // URL, base64 encoded dataset file, or base64: prefixed string (also at top level)
-      max_samples?: number;
-      target: {
-        kind: string;
-        agent_file?: string;
-        base_url?: string;
-      };
-      graders: Record<string, unknown>;
-      gate?: {
-        metric_key: string;
-        op: string;
-        value: number;
-      };
-    };
-    suite_yaml?: string; // URL, base64 encoded suite.yaml file, or base64: prefixed string (optional, if provided will be used instead of generating from suite_config)
+    dataset?: string; // URL, base64 encoded dataset file, or base64: prefixed string
+    suite_yaml: string; // URL, base64 encoded suite.yaml file, or base64: prefixed string (required)
     rubric?: string; // URL, base64 encoded, or base64: prefixed string
     priority: number;
     metadata?: Record<string, unknown>;
+    // Legacy: suite_config is deprecated, use suite_yaml instead
+    suite_config?: {
+      name?: string;
+      dataset?: string;
+      max_samples?: number;
+      target?: {
+        kind?: string;
+        agent_file?: string;
+        base_url?: string;
+      };
+      graders?: Record<string, unknown>;
+      gate?: {
+        metric_key?: string;
+        op?: string;
+        value?: number;
+      };
+    };
   };
   status: string;
   created_at: string;

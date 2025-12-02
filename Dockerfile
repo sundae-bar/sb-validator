@@ -26,10 +26,15 @@ RUN apt-get update && \
 COPY requirements.lock ./
 RUN pip3 install --no-cache-dir --break-system-packages -r requirements.lock
 
-# Copy Python grader library
-COPY python ./python
+# Copy Python files
+COPY python/grader_lib.py /usr/local/lib/python3.11/dist-packages/letta_evals/graders/grader_lib.py
+COPY python/register_graders.py /app/python/register_graders.py
+COPY python/run_with_graders.py /app/python/run_with_graders.py
 
-# Set PYTHONPATH so letta-evals can find the grader library
+# Set permissions
+RUN chmod +x /app/python/register_graders.py /app/python/run_with_graders.py
+
+# Set PYTHONPATH
 ENV PYTHONPATH=/app/python:$PYTHONPATH
 
 # Install only production Node deps
