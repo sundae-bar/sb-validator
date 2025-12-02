@@ -2,6 +2,7 @@ FROM letta/letta:latest
 
 # Ensure env vars are available at runtime
 ENV OPENAI_API_KEY=${OPENAI_API_KEY}
+ENV LETTA_PG_DB_URI=${LETTA_PG_DB_URI}
 
 # Use Railway's PORT variable
 CMD letta server --host 0.0.0.0 --port ${PORT:-8283}
