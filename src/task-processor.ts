@@ -148,15 +148,33 @@ export class TaskProcessor {
 
       const evaluationResult = await this.runEvaluation(files.suitePath, taskWorkDir);
 
-      // Step 4: Submit results (idempotent - can submit multiple times)
-      logger.info({ taskId }, 'Submitting evaluation results');
+      // Step 4: Extract score from summary
+      let score: number | undefined = undefined;
+      if (evaluationResult.summary && typeof evaluationResult.summary === 'object') {
+        const summary = evaluationResult.summary as Record<string, unknown>;
+        // Try to get score from summary.metrics.avg_score_total (preferred)
+        if (summary.metrics && typeof summary.metrics === 'object') {
+          const metrics = summary.metrics as Record<string, unknown>;
+          if (typeof metrics.avg_score_total === 'number') {
+            score = metrics.avg_score_total;
+          }
+        }
+        // Fallback: try summary.avg_score_total directly
+        if (score === undefined && typeof summary.avg_score_total === 'number') {
+          score = summary.avg_score_total;
+        }
+      }
+
+      // Step 5: Submit results (idempotent - can submit multiple times)
+      logger.info({ taskId, score }, 'Submitting evaluation results');
 
       await this.apiClient.submitResults(taskId, 'completed', {
         summary: evaluationResult.summary,
         results: evaluationResult.results,
         artifacts: evaluationResult.artifacts,
         duration_seconds: evaluationResult.duration_seconds,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        score // Include extracted score
       });
 
       logger.info({ taskId }, 'Task processed successfully');
@@ -431,8 +449,8 @@ export class TaskProcessor {
     let agentFilePath: string | undefined;
     let agentFileName = 'agent.af';
     
-    if (taskPayload.agent_file) {
-      const agentContent = await this.downloadFile(taskPayload.agent_file);
+    if (taskPayload.agent_file_path) {
+      const agentContent = await this.downloadFile(taskPayload.agent_file_path);
       agentFilePath = path.join(workDir, agentFileName);
       await fs.writeFile(agentFilePath, agentContent, 'utf-8');
       
@@ -454,8 +472,8 @@ export class TaskProcessor {
 
     // Download and write dataset
     let datasetPath: string | undefined;
-    const dataset = taskPayload.dataset;
-    
+    const dataset = taskPayload.dataset_file_path;
+
     if (dataset) {
       if (dataset.startsWith('http://') || dataset.startsWith('https://') || dataset.startsWith('base64:')) {
         // Download from URL or decode from base64
@@ -517,8 +535,8 @@ export class TaskProcessor {
     `.trim();
 
     rubricPath = path.join(workDir, 'rubric.txt');
-    if (taskPayload.rubric) {
-      const rubricContent = await this.downloadFile(taskPayload.rubric);
+    if (taskPayload.rubric_file_path) {
+      const rubricContent = await this.downloadFile(taskPayload.rubric_file_path);
       await fs.writeFile(rubricPath, rubricContent, 'utf-8');
       logger.info({ rubricPath }, 'Downloaded rubric file');
     } else {
@@ -538,15 +556,15 @@ export class TaskProcessor {
       throw new Error(`Invalid base_url: "${targetBaseUrl}" - must start with http:// or https://`);
     }
 
-    // Create suite.yaml from provided suite_yaml file
+    // Create suite.yaml from provided suite_file_path file
     const suitePath = path.join(workDir, 'suite.yaml');
     
-    if (!taskPayload.suite_yaml || typeof taskPayload.suite_yaml !== 'string') {
-      throw new Error('suite_yaml is required but was not provided in task payload');
+    if (!taskPayload.suite_file_path || typeof taskPayload.suite_file_path !== 'string') {
+      throw new Error('suite_file_path is required but was not provided in task payload');
     }
 
     // Use provided suite.yaml file, but override base_url and ensure dataset path is correct
-    const suiteYamlContent = await this.downloadFile(taskPayload.suite_yaml);
+    const suiteYamlContent = await this.downloadFile(taskPayload.suite_file_path);
     let suiteConfig = yaml.load(suiteYamlContent) as any;
     
     if (!suiteConfig) {

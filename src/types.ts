@@ -21,13 +21,13 @@ export interface Task {
   evaluator_id?: string;
   task_payload: {
     task_id: string;
-    agent_file?: string; // URL, base64 encoded, or base64: prefixed string
-    dataset?: string; // URL, base64 encoded dataset file, or base64: prefixed string
-    suite_yaml: string; // URL, base64 encoded suite.yaml file, or base64: prefixed string (required)
-    rubric?: string; // URL, base64 encoded, or base64: prefixed string
-    priority: number;
+    agent_file_path?: string; // URL, base64 encoded, or base64: prefixed string
+    dataset_file_path?: string; // URL, base64 encoded dataset file, or base64: prefixed string
+    suite_file_path: string; // URL, base64 encoded suite.yaml file, or base64: prefixed string (required)
+    rubric_file_path?: string; // URL, base64 encoded, or base64: prefixed string
+    priority?: number;
     metadata?: Record<string, unknown>;
-    // Legacy: suite_config is deprecated, use suite_yaml instead
+    // Legacy: suite_config is deprecated, use suite_file_path instead
     suite_config?: {
       name?: string;
       dataset?: string;

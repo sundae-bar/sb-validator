@@ -34,7 +34,7 @@ cp .env.example .env
 
 Edit `.env` and set:
 - `MNEMONIC`: Your mnemonic phrase
-- `API_URL`: Coordinator API URL (e.g., `http://localhost:3000`)
+- `API_URL`: Coordinator API URL (e.g., `http://localhost:3002` or `http://localhost:3002/api/v2/validators`)
 
 ### 3. Run Locally
 
@@ -61,7 +61,7 @@ Or with inline environment variables:
 # Note: Use host.docker.internal for Mac/Windows, or your host IP for Linux
 docker run --rm \
   -e MNEMONIC="your mnemonic here" \
-  -e API_URL="http://host.docker.internal:3000" \
+  -e API_URL="http://host.docker.internal:3002/api/v2/validators" \
   -e DISPLAY_NAME="My Validator" \
   -e OPENAI_API_KEY="your-openai-key" \
   -e ANTHROPIC_API_KEY="your-anthropic-key" \
@@ -71,8 +71,10 @@ docker run --rm \
 ```
 
 **Important for Docker:** When running in Docker, `localhost` refers to the container, not your host machine. Use:
-- **Mac/Windows**: `host.docker.internal` (e.g., `http://host.docker.internal:3000`)
+- **Mac/Windows**: `host.docker.internal` (e.g., `http://host.docker.internal:3002/api/v2/validators`)
 - **Linux**: Your host machine's IP address or use `--network host`
+
+**Note:** The `API_URL` can include the full path (e.g., `http://host.docker.internal:3002/api/v2/validators`) or just the base URL (e.g., `http://host.docker.internal:3002`). The validator will automatically handle both formats.
 
 **Example with Local Letta Server:**
 
@@ -103,7 +105,7 @@ docker run --rm \
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `MNEMONIC` | Yes | - | Mnemonic phrase for key pair |
-| `API_URL` | Yes | - | Coordinator API base URL |
+| `API_URL` | Yes | - | Coordinator API URL. Can be base URL (e.g., `http://localhost:3002`) or full path (e.g., `http://localhost:3002/api/v2/validators`) |
 | `DISPLAY_NAME` | No | - | Validator display name |
 | `VERSION` | No | `1.0.0` | Validator version |
 | `POLL_INTERVAL` | No | `5` | Poll interval in seconds |
@@ -195,7 +197,7 @@ Run a Letta server yourself (for example using the `../letta-server` Docker Comp
 ```bash
 docker run --rm \
   -e MNEMONIC="..." \
-  -e API_URL="http://localhost:3000" \
+  -e API_URL="http://localhost:3002/api/v2/validators" \
   -e LETTA_BASE_URL="http://host.docker.internal:8283" \
   -e OPENAI_API_KEY="sk-..." \
   sundae-bar-validator:latest
@@ -214,7 +216,7 @@ Use Letta's managed service:
 ```bash
 docker run --rm \
   -e MNEMONIC="..." \
-  -e API_URL="http://localhost:3000" \
+  -e API_URL="http://localhost:3002/api/v2/validators" \
   -e LETTA_API_KEY="your-cloud-key" \
   -e OPENAI_API_KEY="sk-..." \
   sundae-bar-validator:latest
@@ -230,7 +232,7 @@ If both `LETTA_API_KEY` and `LETTA_BASE_URL` are provided, Letta Cloud (API key)
    - Starts heartbeat loop
 
 2. **Polling**:
-   - Polls coordinator for tasks (`GET /api/evaluators/tasks?hotkey=...&status=queued`)
+   - Polls coordinator for tasks (`GET /api/v2/validators/tasks?hotkey=...&status=queued`)
    - Claims tasks and processes them
    - Runs `letta-evals` with appropriate API keys
    - Submits results back to coordinator

@@ -30,7 +30,14 @@ export class ApiClient {
   ) {
     this.pair = pair;
     this.hotkey = getHotkey(pair);
-    this.apiUrl = apiUrl.replace(/\/$/, ''); // Remove trailing slash
+    
+    // Handle API_URL that might include the full path (e.g., http://localhost:3002/api/v2/validators)
+    // or just the base URL (e.g., http://localhost:3002)
+    let baseUrl = apiUrl.replace(/\/$/, ''); // Remove trailing slash
+    
+    // If API_URL already includes /api/v2/validators, use it as-is
+    // Otherwise, we'll append the path in each method
+    this.apiUrl = baseUrl;
     this.maxRetries = maxRetries;
     this.retryDelay = retryDelay;
 
@@ -93,6 +100,27 @@ export class ApiClient {
   }
 
   /**
+   * Get the full API path, handling both base URL and full URL cases
+   * 
+   * If API_URL includes /api/v2/validators (e.g., http://localhost:3002/api/v2/validators),
+   * then baseURL is already set correctly and we use relative paths like /register.
+   * 
+   * If API_URL is just the base (e.g., http://localhost:3002),
+   * then we prepend /api/v2/validators to the path.
+   */
+  private getApiPath(endpoint: string): string {
+    const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+    
+    // If API_URL already includes /api/v2/validators, use endpoint as-is (relative to baseURL)
+    if (this.apiUrl.includes('/api/v2/validators')) {
+      return cleanEndpoint;
+    }
+    
+    // Otherwise, prepend /api/v2/validators
+    return `/api/v2/validators${cleanEndpoint}`;
+  }
+
+  /**
    * Make a signed request
    */
   private async signedRequest<T>(
@@ -100,7 +128,7 @@ export class ApiClient {
     path: string,
     payload?: object
   ): Promise<T> {
-    const url = path.startsWith('/') ? path : `/${path}`;
+    const url = this.getApiPath(path);
     let signature: string | undefined;
     let body: any = payload;
 
@@ -157,7 +185,7 @@ export class ApiClient {
     try {
       const response = await this.signedRequest<RegistrationResponse>(
         'POST',
-        '/api/evaluators/register',
+        '/register',
         payload
       );
 
@@ -189,7 +217,7 @@ export class ApiClient {
     };
 
     try {
-      await this.signedRequest('POST', '/api/evaluators/heartbeat', payload);
+      await this.signedRequest('POST', '/heartbeat', payload);
       logger.debug({ hotkey: this.hotkey }, 'Heartbeat sent successfully');
     } catch (error) {
       logger.error(
@@ -207,7 +235,7 @@ export class ApiClient {
     logger.info({ hotkey: this.hotkey, status, limit }, 'Polling for tasks');
 
     try {
-      const response = await this.client.get<TaskResponse>('/api/evaluators/tasks', {
+      const response = await this.client.get<TaskResponse>(this.getApiPath('/tasks'), {
         params: {
           hotkey: this.hotkey,
           status,
@@ -243,7 +271,7 @@ export class ApiClient {
     try {
       const response = await this.signedRequest<ClaimResponse>(
         'POST',
-        `/api/evaluators/tasks/${taskId}/claim`,
+        `/tasks/${taskId}/claim`,
         payload
       );
 
@@ -290,7 +318,7 @@ export class ApiClient {
     try {
       const response = await this.signedRequest<ResultResponse>(
         'POST',
-        `/api/evaluators/tasks/${taskId}/result`,
+        `/tasks/${taskId}/result`,
         payload
       );
 
