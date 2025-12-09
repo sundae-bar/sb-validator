@@ -14,6 +14,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { exec } from 'child_process';
 import { promisify } from 'util';
+import { setTimeout as setTimeoutPromise } from 'timers/promises';
 import * as yaml from 'js-yaml';
 import logger from './logger';
 import { ApiClient } from './api-client';
@@ -353,27 +354,85 @@ export class TaskProcessor {
   /**
    * Download file from URL or decode from base64
    */
-  private async downloadFile(urlOrBase64: string): Promise<string> {
-    if (urlOrBase64.startsWith('http://') || urlOrBase64.startsWith('https://')) {
-      const response = await fetch(urlOrBase64, {
-        cache: 'no-store',
-        headers: {
-          'Cache-Control': 'no-store',
-          'Pragma': 'no-cache',
-          'Expires': '0'
-        }
-      });
-      if (!response.ok) {
-        throw new Error(`Failed to download file: ${response.status} ${response.statusText}`);
+  private async downloadFileWithBackup(
+    primaryUrl: string,
+    backupUrl?: string,
+    timeoutMs: number = 10_000
+  ): Promise<string> {
+    const logPrimary = primaryUrl.substring(0, 200);
+    const logBackup = backupUrl ? backupUrl.substring(0, 200) : undefined;
+
+    const attemptDownload = async (url: string): Promise<string> => {
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        throw new Error(`Invalid file URL: ${url.substring(0, 120)}`);
       }
-      const content = await response.text();
-      return content;
-    } else if (urlOrBase64.startsWith('base64:')) {
-      const base64Data = urlOrBase64.substring(7);
-      const content = Buffer.from(base64Data, 'base64').toString('utf-8');
-      return content;
-    } else {
-      return Buffer.from(urlOrBase64, 'base64').toString('utf-8');
+
+      const maxAttempts = 2;
+      const baseDelayMs = 500;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const start = Date.now();
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), timeoutMs);
+          const response = await fetch(url, {
+            cache: 'no-store',
+            headers: {
+              'Cache-Control': 'no-store',
+              'Pragma': 'no-cache',
+              'Expires': '0'
+            },
+            signal: controller.signal
+          });
+          clearTimeout(timer);
+
+          const elapsed = Date.now() - start;
+
+          if (!response.ok) {
+            const bodySnippet = await response.text().catch(() => '');
+            const statusMsg = `Failed to download file: ${response.status} ${response.statusText}`;
+            logger.warn(
+              {
+                url: url.substring(0, 200),
+                status: response.status,
+                attempt,
+                elapsedMs: elapsed,
+                bodySnippet: bodySnippet.slice(0, 500)
+              },
+              statusMsg
+            );
+
+            if (response.status >= 500 && attempt < maxAttempts) {
+              await setTimeoutPromise(baseDelayMs * attempt);
+              continue;
+            }
+            throw new Error(statusMsg);
+          }
+
+          const content = await response.text();
+          return content;
+        } catch (err) {
+          const elapsed = Date.now() - start;
+          const isLast = attempt === maxAttempts;
+          const errMsg = err instanceof Error ? err.message : String(err);
+          logger.warn({ url: url.substring(0, 200), attempt, elapsedMs: elapsed, err: errMsg }, 'Download attempt failed');
+          if (isLast) {
+            throw err;
+          }
+          await setTimeoutPromise(baseDelayMs * attempt);
+        }
+      }
+      throw new Error('Unexpected download failure');
+    };
+
+    try {
+      return await attemptDownload(primaryUrl);
+    } catch (primaryErr) {
+      if (backupUrl) {
+        logger.warn({ primary: logPrimary, backup: logBackup, err: String(primaryErr) }, 'Primary download failed, trying backup');
+        return attemptDownload(backupUrl);
+      }
+      throw primaryErr;
     }
   }
 
@@ -446,11 +505,20 @@ export class TaskProcessor {
     }
 
     // Download and write agent file
+    logger.info({ taskId: taskPayload.task_id, workDir }, 'PrepareFiles: start');
+
     let agentFilePath: string | undefined;
     let agentFileName = 'agent.af';
     
     if (taskPayload.agent_file_path) {
-      const agentContent = await this.downloadFile(taskPayload.agent_file_path);
+      logger.info(
+        { taskId: taskPayload.task_id, url: taskPayload.agent_file_path },
+        'PrepareFiles: downloading agent file'
+      );
+      const agentContent = await this.downloadFileWithBackup(
+        taskPayload.agent_file_path,
+        (taskPayload as any).agent_backup_file_path
+      );
       agentFilePath = path.join(workDir, agentFileName);
       await fs.writeFile(agentFilePath, agentContent, 'utf-8');
       
@@ -459,15 +527,13 @@ export class TaskProcessor {
       const previewLength = 2000; // Prevent logging extremely large files
       const agentPreview = agentContent.substring(0, previewLength);
       
-      logger.info(
-        {
-          agentFilePath,
-          previewLength: agentContent.length,
-          previewTruncated: agentContent.length > previewLength,
-          agentPreview
-        },
-        'Downloaded agent file (preview)'
-      );
+      logger.info({
+        taskId: taskPayload.task_id,
+        agentFilePath,
+        previewLength: agentContent.length,
+        previewTruncated: agentContent.length > previewLength,
+        agentPreview
+      }, 'PrepareFiles: downloaded agent file (preview)');
     }
 
     // Download and write dataset
@@ -475,26 +541,39 @@ export class TaskProcessor {
     const dataset = taskPayload.dataset_file_path;
 
     if (dataset) {
+      logger.info(
+        { taskId: taskPayload.task_id, url: dataset },
+        'PrepareFiles: downloading dataset'
+      );
       if (dataset.startsWith('http://') || dataset.startsWith('https://') || dataset.startsWith('base64:')) {
         // Download from URL or decode from base64
-        const datasetContent = await this.downloadFile(dataset);
+        const datasetContent = await this.downloadFileWithBackup(
+          dataset,
+          (taskPayload as any).dataset_backup_file_path
+        );
 
         datasetPath = path.join(workDir, 'dataset.jsonl');
         
         // Convert CSV to JSONL if needed
         let finalContent = datasetContent;
         if (this.isCsvContent(datasetContent)) {
+          logger.info({ taskId: taskPayload.task_id, datasetPath }, 'PrepareFiles: converting CSV to JSONL');
           finalContent = this.csvToJsonl(datasetContent);
         }
         
         await fs.writeFile(datasetPath, finalContent, 'utf-8');
         try {
           await this.validateDataset(datasetPath);
-          logger.info({ datasetPath }, 'Downloaded and validated dataset file');
+          logger.info({ taskId: taskPayload.task_id, datasetPath }, 'PrepareFiles: downloaded and validated dataset file');
         } catch (error) {
           // Re-throw with more context
           const errorMessage = error instanceof Error ? error.message : String(error);
-          logger.error({ datasetPath, error: errorMessage, firstLine: finalContent.split('\n')[0]?.substring(0, 200) }, 'Dataset validation failed');
+          logger.error({
+            taskId: taskPayload.task_id,
+            datasetPath,
+            error: errorMessage,
+            firstLine: finalContent.split('\n')[0]?.substring(0, 200)
+          }, 'PrepareFiles: dataset validation failed');
           throw error;
         }
       } else {
@@ -536,12 +615,16 @@ export class TaskProcessor {
 
     rubricPath = path.join(workDir, 'rubric.txt');
     if (taskPayload.rubric_file_path) {
-      const rubricContent = await this.downloadFile(taskPayload.rubric_file_path);
+      logger.info({ taskId: taskPayload.task_id, url: taskPayload.rubric_file_path }, 'PrepareFiles: downloading rubric');
+        const rubricContent = await this.downloadFileWithBackup(
+          taskPayload.rubric_file_path,
+          (taskPayload as any).rubric_backup_file_path
+        );
       await fs.writeFile(rubricPath, rubricContent, 'utf-8');
-      logger.info({ rubricPath }, 'Downloaded rubric file');
+      logger.info({ taskId: taskPayload.task_id, rubricPath }, 'PrepareFiles: downloaded rubric file');
     } else {
       await fs.writeFile(rubricPath, defaultRubric, 'utf-8');
-      logger.info({ rubricPath }, 'Created default rubric file');
+      logger.info({ taskId: taskPayload.task_id, rubricPath }, 'PrepareFiles: created default rubric file');
     }
 
     // Override base_url to use validator's configured Letta server
@@ -564,7 +647,11 @@ export class TaskProcessor {
     }
 
     // Use provided suite.yaml file, but override base_url and ensure dataset path is correct
-    const suiteYamlContent = await this.downloadFile(taskPayload.suite_file_path);
+    logger.info({ taskId: taskPayload.task_id, url: taskPayload.suite_file_path }, 'PrepareFiles: downloading suite.yaml');
+    const suiteYamlContent = await this.downloadFileWithBackup(
+      taskPayload.suite_file_path,
+      (taskPayload as any).suite_backup_file_path
+    );
     let suiteConfig = yaml.load(suiteYamlContent) as any;
     
     if (!suiteConfig) {
@@ -589,7 +676,13 @@ export class TaskProcessor {
     
     const updatedYamlContent = yaml.dump(suiteConfig);
     await fs.writeFile(suitePath, updatedYamlContent, 'utf-8');
-    logger.info({ suitePath }, 'Updated provided suite.yaml');
+    logger.info({
+      taskId: taskPayload.task_id,
+      suitePath,
+      targetBaseUrl,
+      agentFilePath: agentFilePath ? path.basename(agentFilePath) : undefined,
+      datasetPath: datasetPath ? path.basename(datasetPath) : undefined
+    }, 'PrepareFiles: updated suite.yaml');
 
     return {
       suitePath,

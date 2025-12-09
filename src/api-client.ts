@@ -234,21 +234,25 @@ export class ApiClient {
   async pollTasks(status: string = 'queued', limit: number = 10): Promise<TaskResponse> {
     logger.info({ hotkey: this.hotkey, status, limit }, 'Polling for tasks');
 
+    const payload = {
+      hotkey: this.hotkey,
+      status,
+      limit
+    };
+
     try {
-      const response = await this.client.get<TaskResponse>(this.getApiPath('/tasks'), {
-        params: {
-          hotkey: this.hotkey,
-          status,
-          limit
-        }
-      });
+      const response = await this.signedRequest<TaskResponse>(
+        'POST',
+        '/tasks/poll',
+        payload
+      );
 
       logger.info(
-        { count: response.data.count, status, taskIds: response.data.tasks?.map(t => t.id) || [] },
+        { count: response.count, status, taskIds: response.tasks?.map(t => t.id) || [] },
         'Fetched tasks'
       );
 
-      return response.data;
+      return response;
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
