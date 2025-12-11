@@ -149,6 +149,10 @@ export class TaskProcessor {
 
       const evaluationResult = await this.runEvaluation(files.suitePath, taskWorkDir);
 
+      // Helper to round scores to 5 decimal places
+      const roundScore = (value: number) =>
+        Math.round(value * 100_000) / 100_000;
+
       // Step 4: Extract score from summary
       let score: number | undefined = undefined;
       if (evaluationResult.summary && typeof evaluationResult.summary === 'object') {
@@ -157,17 +161,22 @@ export class TaskProcessor {
         if (summary.metrics && typeof summary.metrics === 'object') {
           const metrics = summary.metrics as Record<string, unknown>;
           if (typeof metrics.avg_score_total === 'number') {
-            score = metrics.avg_score_total;
+            score = roundScore(metrics.avg_score_total);
           }
         }
         // Fallback: try summary.avg_score_total directly
         if (score === undefined && typeof summary.avg_score_total === 'number') {
-          score = summary.avg_score_total;
+          score = roundScore(summary.avg_score_total);
         }
       }
 
+      // Count tests (results entries)
+      const testsCount = Array.isArray(evaluationResult.results)
+        ? evaluationResult.results.length
+        : 0;
+
       // Step 5: Submit results (idempotent - can submit multiple times)
-      logger.info({ taskId, score }, 'Submitting evaluation results');
+      logger.info({ taskId, score, testsCount }, 'Submitting evaluation results');
 
       await this.apiClient.submitResults(taskId, 'completed', {
         summary: evaluationResult.summary,
@@ -175,7 +184,8 @@ export class TaskProcessor {
         artifacts: evaluationResult.artifacts,
         duration_seconds: evaluationResult.duration_seconds,
         timestamp: new Date().toISOString(),
-        score // Include extracted score
+        score, // Include extracted score
+        tests_count: testsCount
       });
 
       logger.info({ taskId }, 'Task processed successfully');
@@ -1288,7 +1298,7 @@ export class TaskProcessor {
         
         // Display weighted average score
         if (weightedScore !== undefined) {
-          console.log(`│  Score: ${weightedScore.toFixed(3)} (weighted avg)`);
+          console.log(`│  Score: ${weightedScore.toFixed(5)} (weighted avg)`);
           weightedScores.push(weightedScore);
         } else if (grades && Object.keys(grades).length > 0) {
           // Fallback: calculate simple average if weights not available
@@ -1297,7 +1307,7 @@ export class TaskProcessor {
             .filter((s): s is number => typeof s === 'number');
           if (scores.length > 0) {
             const avgScore = scores.reduce((sum, s) => sum + s, 0) / scores.length;
-            console.log(`│  Score: ${avgScore.toFixed(3)} (avg)`);
+            console.log(`│  Score: ${avgScore.toFixed(5)} (avg)`);
             weightedScores.push(avgScore);
           }
         }
@@ -1310,7 +1320,7 @@ export class TaskProcessor {
             const graderRationale = grader?.rationale as string | undefined;
             
             if (graderScore !== undefined && graderScore !== null) {
-              console.log(`│    • ${graderName}: ${graderScore.toFixed(3)}`);
+              console.log(`│    • ${graderName}: ${graderScore.toFixed(5)}`);
               
               // Display rationale if available, nicely formatted
               if (graderRationale) {
@@ -1389,13 +1399,13 @@ export class TaskProcessor {
       let calculatedAvg: number | undefined = undefined;
       if (weightedScores.length > 0) {
         calculatedAvg = weightedScores.reduce((sum, s) => sum + s, 0) / weightedScores.length;
-        console.log(`│  Calculated Avg (from weighted scores): ${calculatedAvg.toFixed(3)}`);
+        console.log(`│  Calculated Avg (from weighted scores): ${calculatedAvg.toFixed(5)}`);
       }
       
       if (metrics) {
         if (metrics.avg_score_total !== undefined) {
           const lettaAvg = metrics.avg_score_total;
-          console.log(`│  AETS avg_score_total: ${lettaAvg.toFixed(3)}`);
+          console.log(`│  AETS avg_score_total: ${lettaAvg.toFixed(5)}`);
           
           // Compare our calculation with letta-evals
           if (calculatedAvg !== undefined) {
@@ -1408,7 +1418,7 @@ export class TaskProcessor {
           }
         }
         if (metrics.avg_score_attempted !== undefined) {
-          console.log(`│  Avg Score (Attempted): ${metrics.avg_score_attempted.toFixed(3)}`);
+          console.log(`│  Avg Score (Attempted): ${metrics.avg_score_attempted.toFixed(5)}`);
         }
 
         // By metric breakdown
@@ -1423,8 +1433,8 @@ export class TaskProcessor {
                 const total = metricData.avg_score_total;
                 const attempted = metricData.avg_score_attempted;
                 if (total !== undefined || attempted !== undefined) {
-                  const totalStr = total !== undefined ? total.toFixed(3) : 'N/A';
-                  const attemptedStr = attempted !== undefined ? attempted.toFixed(3) : 'N/A';
+                  const totalStr = total !== undefined ? total.toFixed(5) : 'N/A';
+                  const attemptedStr = attempted !== undefined ? attempted.toFixed(5) : 'N/A';
                   console.log(`│    • ${metricName}: ${totalStr} (total) / ${attemptedStr} (attempted)`);
                 }
               }
