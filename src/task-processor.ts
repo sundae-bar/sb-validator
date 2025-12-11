@@ -846,6 +846,31 @@ export class TaskProcessor {
         env.LETTA_BASE_URL = process.env.LETTA_URL.trim().replace(/^["']|["']$/g, '');
       }
 
+      // Log the exact command and environment for debugging
+      console.log('\n' + '='.repeat(80));
+      console.log('LETTA-EVALS COMMAND:');
+      console.log('='.repeat(80));
+      console.log(`Command: ${cmd}`);
+      console.log(`Working Directory: ${suiteDir}`);
+      console.log(`Output Directory: ${outputDir}`);
+      console.log(`Suite File: ${suiteFile}`);
+      console.log('\nEnvironment Variables (keys only, values hidden for security):');
+      const envKeys = Object.keys(env).sort();
+      for (const key of envKeys) {
+        const value = env[key];
+        // Show if set (but not the actual value for API keys)
+        if (key.includes('API_KEY') || key.includes('SECRET') || key.includes('PASSWORD') || key.includes('TOKEN')) {
+          console.log(`  ${key}=***SET*** (${value ? value.length : 0} chars)`);
+        } else if (key === 'PATH') {
+          console.log(`  ${key}=${value}`);
+        } else {
+          // For other vars, show first 50 chars if not sensitive
+          const preview = value && value.length > 50 ? value.substring(0, 50) + '...' : value;
+          console.log(`  ${key}=${preview}`);
+        }
+      }
+      console.log('='.repeat(80) + '\n');
+
       const { stdout, stderr } = await execAsync(cmd, {
         cwd: suiteDir,
         env,
