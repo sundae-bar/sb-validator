@@ -1,0 +1,86 @@
+services:
+  letta-db:
+    image: ankane/pgvector:v0.5.1
+    container_name: sn121-letta-db
+    environment:
+      - POSTGRES_USER=${LETTA_PG_USER:-letta}
+      - POSTGRES_PASSWORD=${LETTA_PG_PASSWORD:-letta}
+      - POSTGRES_DB=${LETTA_PG_DB:-letta}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${LETTA_PG_USER:-letta}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  letta-server:
+    image: sundaebarai/letta:latest
+    container_name: sn121-letta
+    depends_on:
+      letta-db:
+        condition: service_healthy
+    ports:
+      - "8283:8283"
+    environment:
+      - LETTA_PG_DB=${LETTA_PG_DB:-letta}
+      - LETTA_PG_USER=${LETTA_PG_USER:-letta}
+      - LETTA_PG_PASSWORD=${LETTA_PG_PASSWORD:-letta}
+      - LETTA_PG_HOST=letta-db
+      - LETTA_PG_PORT=5432
+      - LETTA_PG_URI=postgresql://${LETTA_PG_USER:-letta}:${LETTA_PG_PASSWORD:-letta}@letta-db:5432/${LETTA_PG_DB:-letta}
+      - LETTA_SERVER_PASS=${LETTA_SERVER_PASS}
+      - TOGETHER_API_KEY=${TOGETHER_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+    env_file:
+      - .env
+    volumes:
+      - letta-data:/root/.letta
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8283/v1/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  validator:
+    image: sundaebarai/sn121-validator:latest
+    container_name: sn121-validator
+    depends_on:
+      letta-server:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      - LETTA_BASE_URL=http://letta-server:8283
+    env_file:
+      - .env
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8283/v1/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: sn121-watchtower
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_POLL_INTERVAL=300
+      - WATCHTOWER_DEBUG=true
+      - DOCKER_API_VERSION=1.44
+    restart: unless-stopped
+    command:
+      - sn121-validator
+      - sn121-letta
+
+volumes:
+  letta-data:
+  postgres-data:

@@ -13,7 +13,7 @@ import type { ValidatorConfig } from './types';
 // Load configuration from environment variables
 function loadConfig(): ValidatorConfig {
   const mnemonic = process.env.MNEMONIC;
-  const apiUrl = process.env.API_URL || 'http://localhost:3000';
+  const apiUrl = process.env.API_URL || 'http://localhost:3002';
 
   if (!mnemonic) {
     throw new Error(

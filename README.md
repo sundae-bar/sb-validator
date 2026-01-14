@@ -47,12 +47,10 @@ npm run dev
 
 ```bash
 # Build image
-docker build -t sundae-bar-validator:latest .
+docker build -t sn121-validator .
 
 # Run with environment variables
-docker run --rm \
-  --env-file .env \
-  sundae-bar-validator:latest
+docker run --rm --env-file .env sn121-validator
 ```
 
 Or with inline environment variables:
