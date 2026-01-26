@@ -19,6 +19,7 @@ import * as yaml from 'js-yaml';
 import logger from './logger';
 import { ApiClient } from './api-client';
 import type { Task } from './types';
+import { LettaClient } from './letta-client';
 
 const execAsync = promisify(exec);
 
@@ -32,6 +33,7 @@ export class TaskProcessor {
   private workDir: string;
   private processingTasks: Map<string, ProcessingTask> = new Map(); // In-memory tracking
   private maxConcurrentTasks: number;
+  private lettaClient: LettaClient | null = null;
   constructor(
     apiClient: ApiClient,
     workDir: string = '/tmp/validator-work',
@@ -40,6 +42,20 @@ export class TaskProcessor {
     this.apiClient = apiClient;
     this.workDir = workDir;
     this.maxConcurrentTasks = maxConcurrentTasks;
+    
+    // Initialize Letta client if credentials are available
+    const lettaBaseUrl = process.env.LETTA_BASE_URL?.trim().replace(/^["']|["']$/g, '');
+    const lettaApiKey = process.env.LETTA_API_KEY;
+    if (lettaBaseUrl || lettaApiKey) {
+      try {
+        this.lettaClient = new LettaClient(lettaBaseUrl, lettaApiKey);
+      } catch (error) {
+        logger.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Failed to initialize Letta client (file uploads will be disabled)'
+        );
+      }
+    }
   }
 
   /**
@@ -362,6 +378,100 @@ export class TaskProcessor {
    * @param workDir - Task-specific work directory (must be unique per task)
    */
   /**
+   * Download files from GitHub repository
+   */
+  private async downloadFilesFromGitHub(
+    repoUrl: string,
+    folderPath: string,
+    outputDir: string
+  ): Promise<string[]> {
+    // GitHub API URL format: https://api.github.com/repos/owner/repo/contents/path
+    // Extract owner, repo, branch, and path from the GitHub URL
+    // Format: https://github.com/owner/repo/tree/branch/path
+    const match = repoUrl.match(/https:\/\/github\.com\/([^\/]+)\/([^\/]+)\/tree\/([^\/]+)\/(.+)/);
+    if (!match) {
+      throw new Error(`Invalid GitHub URL format: ${repoUrl}. Expected format: https://github.com/owner/repo/tree/branch/path`);
+    }
+    
+    const [, owner, repo, branch, repoPath] = match;
+    const githubApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${repoPath}`;
+    
+    logger.info({ repoUrl, folderPath, githubApiUrl }, 'Downloading files from GitHub');
+
+    try {
+      // Use GitHub API to list files in the directory
+      const response = await fetch(githubApiUrl, {
+        headers: {
+          'Accept': 'application/vnd.github.v3+json',
+          'User-Agent': 'SundaeBar-Validator'
+        }
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        throw new Error(`Failed to fetch GitHub directory: ${response.status} ${response.statusText}. ${errorText}`);
+      }
+
+      const items = await response.json();
+      const downloadedFiles: string[] = [];
+
+      // Ensure output directory exists
+      await fs.mkdir(outputDir, { recursive: true });
+
+      // Process each item (file or directory)
+      for (const item of Array.isArray(items) ? items : [items]) {
+        if (item.type === 'file') {
+          // Use raw.githubusercontent.com for direct file download
+          const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${repoPath}/${item.name}`;
+          
+          const fileResponse = await fetch(rawUrl, {
+            headers: {
+              'User-Agent': 'SundaeBar-Validator'
+            }
+          });
+          
+          if (!fileResponse.ok) {
+            logger.warn({ file: item.name, status: fileResponse.status }, 'Failed to download file from GitHub');
+            continue;
+          }
+
+          const fileContent = await fileResponse.text();
+          const filePath = path.join(outputDir, item.name);
+          await fs.writeFile(filePath, fileContent, 'utf-8');
+          downloadedFiles.push(filePath);
+          logger.info({ fileName: item.name, filePath }, 'Downloaded file from GitHub');
+        } else if (item.type === 'dir') {
+          // Recursively download subdirectory
+          const subDir = path.join(outputDir, item.name);
+          const subRepoUrl = `https://github.com/${owner}/${repo}/tree/${branch}/${repoPath}/${item.name}`;
+          const subFiles = await this.downloadFilesFromGitHub(
+            subRepoUrl,
+            `${folderPath}/${item.name}`,
+            subDir
+          );
+          downloadedFiles.push(...subFiles);
+        }
+      }
+
+      if (downloadedFiles.length === 0) {
+        logger.warn({ repoUrl, folderPath }, 'No files downloaded from GitHub');
+      }
+
+      return downloadedFiles;
+    } catch (error) {
+      logger.error(
+        { error: error instanceof Error ? error.message : String(error), repoUrl, folderPath },
+        'Failed to download files from GitHub'
+      );
+      throw error;
+    }
+  }
+
+  // GitHub repo constant for filesystem data
+  private readonly GITHUB_REPO_URL = 'https://github.com/sundae-bar/sn121-ch-data/tree/main/filesystem_data';
+  private readonly FILESYSTEM_DATA_FOLDER_NAME = 'filesystem_data';
+
+  /**
    * Download file from URL or decode from base64
    */
   private async downloadFileWithBackup(
@@ -447,6 +557,120 @@ export class TaskProcessor {
   }
 
   /**
+   * Update agent file to reference the real Letta folder ID
+   * 
+   * Updates source_ids, files_agents, and sources arrays to use the actual folder ID
+   * instead of placeholder IDs. Also resets is_open and visible_content state fields.
+   * 
+   * @param agentContent - The agent file content as a JSON string
+   * @param folderId - The real Letta folder ID to use
+   * @param taskId - Task ID for logging purposes
+   * @returns Updated agent file content as a JSON string
+   */
+  private updateAgentFileWithFolderId(agentContent: string, folderId: string, taskId: string): string {
+    const agentData = JSON.parse(agentContent);
+    if (!agentData.agents || !Array.isArray(agentData.agents) || agentData.agents.length === 0) {
+      logger.warn(
+        { taskId },
+        'Agent file does not have agents array or it is empty'
+      );
+      return agentContent; // Return unchanged if structure is invalid
+    }
+
+    const agent = agentData.agents[0];
+    let updated = false;
+    
+    // Find any placeholder source IDs (source-0, source-1, etc.) for reference
+    // We'll use this to update files_agents and files arrays
+    const placeholderPattern = /^source-\d+$/; // Matches source-0, source-1, etc.
+    const originalSourceId = agent.source_ids && agent.source_ids.length > 0 
+      ? agent.source_ids[0] 
+      : 'source-0';
+    
+    // 1. Update folder_ids instead of source_ids (source_ids is deprecated and requires integer suffixes)
+    // folder_ids accepts the actual folder ID from Letta
+    if (!agent.folder_ids) {
+      agent.folder_ids = [];
+    }
+    if (!Array.isArray(agent.folder_ids)) {
+      logger.warn({ taskId }, 'folder_ids is not an array, converting');
+      agent.folder_ids = Array.isArray(agent.folder_ids) ? agent.folder_ids : [agent.folder_ids].filter(Boolean);
+    }
+    
+    // Add folder ID to folder_ids if not already present
+    if (!agent.folder_ids.includes(folderId)) {
+      agent.folder_ids.push(folderId);
+      updated = true;
+      logger.info({ folderId, folderIdsCount: agent.folder_ids.length }, 'Added folder ID to folder_ids array');
+    }
+    
+    // Keep source_ids as placeholders (don't update them - they require integer suffixes)
+    // Letta will use folder_ids instead
+    logger.info(
+      { folderId, folderIdsCount: agent.folder_ids.length, sourceIdsCount: agent.source_ids?.length || 0 },
+      'Updated folder_ids array (source_ids kept as placeholders)'
+    );
+    
+    // 2. Update files_agents array - reset state but keep source_id as placeholder
+    // Note: source_id in files_agents must remain as placeholder (integer suffix required)
+    // The folder_ids array tells Letta which folder to use
+    if (agent.files_agents && Array.isArray(agent.files_agents)) {
+      let filesAgentsUpdated = 0;
+      for (const fileAgent of agent.files_agents) {
+        // Only reset state fields, don't update source_id (it must stay as placeholder)
+        if (fileAgent.is_open !== false || fileAgent.visible_content !== null) {
+          fileAgent.is_open = false;
+          fileAgent.visible_content = null;
+          filesAgentsUpdated++;
+          updated = true;
+        }
+      }
+      if (filesAgentsUpdated > 0) {
+        logger.info(
+          { 
+            folderId, 
+            filesAgentsUpdated, 
+            totalFiles: agent.files_agents.length
+          },
+          'Reset files_agents state (is_open=false, visible_content=null) - source_id kept as placeholder'
+        );
+      }
+    } else {
+      logger.debug({ folderId }, 'files_agents array missing or empty, skipping update');
+    }
+    
+    // 3. Don't update files array - files.source_id must remain as placeholder
+    // The folder_ids array tells Letta which folder contains the files
+    
+    // 4. Don't update sources array - sources.id must remain as placeholder (integer suffix required)
+    // The folder_ids array tells Letta which folder to use, and Letta will resolve it
+    logger.debug(
+      { folderId },
+      'Keeping source_ids, files.source_id, and sources.id as placeholders (folder_ids used instead)'
+    );
+    
+    if (updated) {
+      const updatedContent = JSON.stringify(agentData, null, 2);
+      logger.info(
+        { 
+          folderId, 
+          taskId,
+          folderIdsUpdated: agent.folder_ids.includes(folderId),
+          hasFilesAgents: !!(agent.files_agents && agent.files_agents.length > 0)
+        },
+        'Updated agent file with folder ID in folder_ids array'
+      );
+      return updatedContent;
+    } else {
+      logger.warn(
+        { folderId, taskId },
+        'No updates made to agent file (structure may be unexpected)'
+      );
+      return agentContent; // Return unchanged if no updates were made
+    }
+  }
+
+  /**
    * Validate dataset file has 'input' field
    */
   private async validateDataset(datasetPath: string): Promise<void> {
@@ -517,6 +741,80 @@ export class TaskProcessor {
     // Download and write agent file
     logger.info({ taskId: taskPayload.task_id, workDir }, 'PrepareFiles: start');
 
+    // Always set up filesystem data from GitHub for all agents
+    let folderId: string | undefined;
+    
+    if (this.lettaClient) {
+      logger.info({ taskId: taskPayload.task_id }, 'Setting up filesystem data from GitHub');
+      
+      try {
+        // Find or create folder in Letta (reuse same folder for all agents since files are the same)
+        const folder = await this.lettaClient.findOrCreateFolder(
+          this.FILESYSTEM_DATA_FOLDER_NAME,
+          'Filesystem data from GitHub repository'
+        );
+        
+        if (!folder || !folder.id) {
+          throw new Error(`Folder creation returned invalid response: ${JSON.stringify(folder)}`);
+        }
+        
+        folderId = folder.id;
+        logger.info({ folderId, folderName: folder.name }, 'Folder ID obtained for filesystem data');
+        
+        // Download files from GitHub
+        const filesDir = path.join(workDir, 'filesystem_data');
+        const downloadedFiles = await this.downloadFilesFromGitHub(
+          this.GITHUB_REPO_URL,
+          'filesystem_data',
+          filesDir
+        );
+        
+        // Upload files to Letta folder, only if they're new or changed
+        let uploadedCount = 0;
+        let skippedCount = 0;
+        let errorCount = 0;
+        
+        for (const filePath of downloadedFiles) {
+          try {
+            const result = await this.lettaClient.uploadFileIfChanged(folderId, filePath);
+            if (result.uploaded) {
+              uploadedCount++;
+              logger.info(
+                { fileName: path.basename(filePath), folderId, reason: result.reason },
+                'File uploaded to Letta folder'
+              );
+            } else {
+              skippedCount++;
+              logger.debug(
+                { fileName: path.basename(filePath), folderId, reason: result.reason },
+                'File skipped (already exists and unchanged)'
+              );
+            }
+          } catch (error) {
+            errorCount++;
+            logger.error(
+              { error: error instanceof Error ? error.message : String(error), filePath, folderId },
+              'Failed to upload file to Letta folder'
+            );
+            // Continue with other files even if one fails
+          }
+        }
+        
+        logger.info(
+          { folderId, total: downloadedFiles.length, uploaded: uploadedCount, skipped: skippedCount, errors: errorCount },
+          'Filesystem data files processed'
+        );
+        
+        logger.info({ folderId, fileCount: downloadedFiles.length }, 'Filesystem data files uploaded to Letta');
+      } catch (error) {
+        logger.error(
+          { error: error instanceof Error ? error.message : String(error), taskId: taskPayload.task_id },
+          'Failed to set up filesystem data from GitHub'
+        );
+        // Don't fail the entire task, but log the error
+      }
+    }
+
     let agentFilePath: string | undefined;
     let agentFileName = 'agent.af';
     
@@ -525,10 +823,23 @@ export class TaskProcessor {
         { taskId: taskPayload.task_id, url: taskPayload.agent_file_path },
         'PrepareFiles: downloading agent file'
       );
-      const agentContent = await this.downloadFileWithBackup(
+      let agentContent = await this.downloadFileWithBackup(
         taskPayload.agent_file_path,
         (taskPayload as any).agent_backup_file_path
       );
+      
+      // If we have a folder_id, update the agent file to reference it
+      if (folderId) {
+        try {
+          agentContent = this.updateAgentFileWithFolderId(agentContent, folderId, taskPayload.task_id);
+        } catch (error) {
+          logger.warn(
+            { error: error instanceof Error ? error.message : String(error), taskId: taskPayload.task_id },
+            'Failed to update agent file with folder ID (agent file may not be valid JSON or have unexpected structure)'
+          );
+        }
+      }
+      
       agentFilePath = path.join(workDir, agentFileName);
       await fs.writeFile(agentFilePath, agentContent, 'utf-8');
       
@@ -542,6 +853,7 @@ export class TaskProcessor {
         agentFilePath,
         previewLength: agentContent.length,
         previewTruncated: agentContent.length > previewLength,
+        folderId,
         agentPreview
       }, 'PrepareFiles: downloaded agent file (preview)');
     }
