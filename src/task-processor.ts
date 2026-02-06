@@ -34,6 +34,7 @@ export class TaskProcessor {
   private processingTasks: Map<string, ProcessingTask> = new Map(); // In-memory tracking
   private maxConcurrentTasks: number;
   private lettaClient: LettaClient | null = null;
+  private weightsIntervalMs: number;
   constructor(
     apiClient: ApiClient,
     workDir: string = '/tmp/validator-work',
@@ -42,13 +43,16 @@ export class TaskProcessor {
     this.apiClient = apiClient;
     this.workDir = workDir;
     this.maxConcurrentTasks = maxConcurrentTasks;
+    const intervalMinutes = Number(process.env.BITTENSOR_WEIGHTS_INTERVAL_MINUTES || '30');
+    this.weightsIntervalMs = Number.isFinite(intervalMinutes) && intervalMinutes > 0
+      ? intervalMinutes * 60_000
+      : 30 * 60_000;
     
-    // Initialize Letta client if credentials are available
+    // Initialize Letta client if base URL is available
     const lettaBaseUrl = process.env.LETTA_BASE_URL?.trim().replace(/^["']|["']$/g, '');
-    const lettaApiKey = process.env.LETTA_API_KEY;
-    if (lettaBaseUrl || lettaApiKey) {
+    if (lettaBaseUrl) {
       try {
-        this.lettaClient = new LettaClient(lettaBaseUrl, lettaApiKey);
+        this.lettaClient = new LettaClient(lettaBaseUrl);
       } catch (error) {
         logger.warn(
           { error: error instanceof Error ? error.message : String(error) },
@@ -165,6 +169,102 @@ export class TaskProcessor {
 
       const evaluationResult = await this.runEvaluation(files.suitePath, taskWorkDir);
 
+      // Upload full raw evaluation output (untrimmed) to backend for debugging/inspection.
+      // This is separate from the compact result payload we store in result_data.
+      try {
+        const rawOutputPath = path.join(taskWorkDir, 'raw_evaluation.json');
+        await this.apiClient.uploadRawOutputFile(taskId, rawOutputPath);
+      } catch (rawError) {
+        logger.warn(
+          {
+            taskId,
+            error: rawError instanceof Error ? rawError.message : String(rawError),
+          },
+          'Failed to upload raw evaluation output file (non-fatal)',
+        );
+      }
+
+      // Load dataset to map indices to dataset IDs and metadata (input, domain, skill, etc.)
+      const datasetIdMap = new Map<number, string>();
+      const datasetMetaById = new Map<
+        string,
+        {
+          input?: string;
+          domain?: string;
+          skill?: string;
+          difficulty?: string;
+          capability_cluster?: string;
+        }
+      >();
+      if (files.datasetPath) {
+        try {
+          const datasetContent = await fs.readFile(files.datasetPath, 'utf-8');
+          const lines = datasetContent.split('\n').filter(line => line.trim());
+          lines.forEach((line, index) => {
+            try {
+              const sample = JSON.parse(line);
+              if (sample.id && typeof sample.id === 'string') {
+                datasetIdMap.set(index, sample.id);
+                // Extract metadata fields from ground_truth JSON if available
+                if (typeof sample.input === 'string') {
+                  const meta: {
+                    input?: string;
+                    domain?: string;
+                    skill?: string;
+                    difficulty?: string;
+                    capability_cluster?: string;
+                  } = {
+                    input: sample.input,
+                  };
+                  if (typeof sample.ground_truth === 'string') {
+                    try {
+                      const gt = JSON.parse(sample.ground_truth);
+                      const metadata = gt?.metadata as Record<string, unknown> | undefined;
+                      if (metadata && typeof metadata === 'object') {
+                        if (typeof metadata.domain === 'string') {
+                          meta.domain = metadata.domain;
+                        }
+                        if (typeof metadata.skill === 'string') {
+                          meta.skill = metadata.skill;
+                        }
+                        if (typeof metadata.difficulty === 'string') {
+                          meta.difficulty = metadata.difficulty;
+                        }
+                        if (typeof metadata.capability_cluster === 'string') {
+                          meta.capability_cluster = metadata.capability_cluster;
+                        }
+                      }
+                    } catch {
+                      // Ignore ground_truth parse errors
+                    }
+                  }
+                  datasetMetaById.set(sample.id, meta);
+                }
+              }
+            } catch (e) {
+              // Skip invalid JSON lines
+            }
+          });
+          logger.debug(
+            {
+              taskId,
+              datasetIdMapSize: datasetIdMap.size,
+              datasetMetaCount: datasetMetaById.size,
+            },
+            'Loaded dataset ID and metadata mapping'
+          );
+        } catch (error) {
+          logger.warn(
+            {
+              taskId,
+              datasetPath: files.datasetPath,
+              error: error instanceof Error ? error.message : String(error),
+            },
+            'Failed to load dataset for ID mapping (will use index fallback)',
+          );
+        }
+      }
+
       // Helper to round scores to 5 decimal places
       const roundScore = (value: number) =>
         Math.round(value * 100_000) / 100_000;
@@ -177,7 +277,9 @@ export class TaskProcessor {
         if (summary.metrics && typeof summary.metrics === 'object') {
           const metrics = summary.metrics as Record<string, unknown>;
           if (typeof metrics.avg_score_total === 'number') {
-            score = roundScore(metrics.avg_score_total);
+            if (typeof metrics.scout_rubric_grader === 'number') {
+              score = roundScore(metrics.scout_rubric_grader);
+            }
           }
         }
         // Fallback: try summary.avg_score_total directly
@@ -191,18 +293,111 @@ export class TaskProcessor {
         ? evaluationResult.results.length
         : 0;
 
-      // Step 5: Submit results (idempotent - can submit multiple times)
-      logger.info({ taskId, score, testsCount }, 'Submitting evaluation results');
+      // Step 5: Build compact result payload and submit results (idempotent)
+      // We trim down the data to avoid sending large payloads:
+      // - results: [{ id, score, rationale, tokens }]
+      // - total_score, total_tests, duration_seconds, total_tokens, keys
+      const compactResults =
+        Array.isArray(evaluationResult.results) ?
+          evaluationResult.results.map((result: unknown, index: number) => {
+            if (typeof result !== 'object' || result === null) {
+              return null;
+            }
 
-      await this.apiClient.submitResults(taskId, 'completed', {
-        summary: evaluationResult.summary,
-        results: evaluationResult.results,
-        artifacts: evaluationResult.artifacts,
+            const resultObj = result as Record<string, any>;
+            const resultData = resultObj.result as Record<string, any> | undefined;
+            if (!resultData) {
+              return null;
+            }
+
+            const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
+            const performance = resultData.performance as { total_tokens?: number } | undefined;
+
+            // Try to get ID from result object, then from dataset mapping, then fallback to index
+            const id =
+              resultObj.id ??
+              resultObj.sample_id ??
+              resultObj.task_id ??
+              datasetIdMap.get(index) ??
+              index;
+
+            const perSampleScore =
+              typeof resultData.weighted_score === 'number'
+                ? resultData.weighted_score
+                : typeof grade?.score === 'number'
+                  ? grade.score
+                  : null;
+
+            const tokens =
+              typeof performance?.total_tokens === 'number'
+                ? performance.total_tokens
+                : null;
+
+            // Attach optional metadata from dataset (if available) for downstream aggregation
+            const meta =
+              typeof id === 'string' ? datasetMetaById.get(id) : undefined;
+
+            return {
+              id,
+              score: perSampleScore,
+              rationale: grade?.rationale ?? null,
+              tokens,
+              input: meta?.input ?? null,
+              domain: meta?.domain ?? null,
+              skill: meta?.skill ?? null,
+              difficulty: meta?.difficulty ?? null,
+              capability_cluster: meta?.capability_cluster ?? null,
+            };
+          }).filter((r) => r !== null) as Array<{
+            id: string | number;
+            score: number | null;
+            rationale: string | null;
+            tokens: number | null;
+            input: string | null;
+            domain: string | null;
+            skill: string | null;
+            difficulty: string | null;
+            capability_cluster: string | null;
+          }>
+        : [];
+
+      const totalTokens = compactResults.reduce((sum, r) => {
+        return sum + (typeof r.tokens === 'number' ? r.tokens : 0);
+      }, 0);
+
+      // Calculate total_score from individual results if not available from summary
+      let calculatedTotalScore: number | null = score ?? null;
+      if (calculatedTotalScore === null && compactResults.length > 0) {
+        const scoresWithValues = compactResults
+          .map((r) => r.score)
+          .filter((s): s is number => typeof s === 'number');
+        if (scoresWithValues.length > 0) {
+          const sum = scoresWithValues.reduce((acc, s) => acc + s, 0);
+          calculatedTotalScore = roundScore(sum / scoresWithValues.length);
+        }
+      }
+
+      const compactPayload = {
+        results: compactResults,
+        score: calculatedTotalScore,
+        tests_count: testsCount,
         duration_seconds: evaluationResult.duration_seconds,
+        total_tokens: totalTokens,
         timestamp: new Date().toISOString(),
-        score, // Include extracted score
-        tests_count: testsCount
-      });
+      };
+
+      logger.info(
+        {
+          taskId,
+          score,
+          testsCount,
+          compactResultsCount: compactResults.length,
+          totalTokens,
+        },
+        'Submitting compact evaluation results',
+      );
+
+      await this.apiClient.submitResults(taskId, 'completed', compactPayload);
 
       logger.info({ taskId }, 'Task processed successfully');
 
@@ -235,7 +430,7 @@ export class TaskProcessor {
     } finally {
       // Cleanup: remove temp files (can be disabled via KEEP_TASK_FILES=1 for debugging)
       let keepTaskFiles = process.env.KEEP_TASK_FILES === '1';
-      keepTaskFiles = true;
+      keepTaskFiles = false;
       if (!keepTaskFiles) {
         try {
           const taskWorkDir = path.join(this.workDir, taskId);
@@ -377,6 +572,26 @@ export class TaskProcessor {
    * @param taskPayload - Task payload containing files and config
    * @param workDir - Task-specific work directory (must be unique per task)
    */
+  /**
+   * Recursively collect all file paths under a directory.
+   */
+  private async getAllFilesInDirectory(dir: string): Promise<string[]> {
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    const files: string[] = [];
+
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        const subFiles = await this.getAllFilesInDirectory(fullPath);
+        files.push(...subFiles);
+      } else if (entry.isFile()) {
+        files.push(fullPath);
+      }
+    }
+
+    return files;
+  }
+
   /**
    * Download files from GitHub repository
    */
@@ -611,10 +826,9 @@ export class TaskProcessor {
       'Updated folder_ids array (source_ids kept as placeholders)'
     );
     
-    // 2. Update files_agents array - reset state but keep source_id as placeholder
-    // Note: source_id in files_agents must remain as placeholder (integer suffix required)
-    // The folder_ids array tells Letta which folder to use
-    if (agent.files_agents && Array.isArray(agent.files_agents)) {
+    // 2. Update files_agents array - reset state but keep source_id as placeholder.
+    // Then minimize: clear files_agents so we don't encode a specific file list in the agent file.
+    if (agent.files_agents && Array.isArray(agent.files_agents) && agent.files_agents.length > 0) {
       let filesAgentsUpdated = 0;
       for (const fileAgent of agent.files_agents) {
         // Only reset state fields, don't update source_id (it must stay as placeholder)
@@ -635,15 +849,31 @@ export class TaskProcessor {
           'Reset files_agents state (is_open=false, visible_content=null) - source_id kept as placeholder'
         );
       }
+
+      // Now remove per-file mappings to avoid mismatches with the actual folder contents.
+      agent.files_agents = [];
+      updated = true;
+      logger.info(
+        { folderId },
+        'Cleared agents[0].files_agents to avoid encoding a fixed file list in the agent file'
+      );
     } else {
       logger.debug({ folderId }, 'files_agents array missing or empty, skipping update');
     }
     
-    // 3. Don't update files array - files.source_id must remain as placeholder
-    // The folder_ids array tells Letta which folder contains the files
+    // 3. Minimize root-level files array as well: keep schema-valid but empty so it
+    //    does not drift from the real folder contents.
+    if (Array.isArray(agentData.files) && agentData.files.length > 0) {
+      agentData.files = [];
+      updated = true;
+      logger.info(
+        { folderId },
+        'Cleared root files[] array to avoid mismatches with folder-backed filesystem data'
+      );
+    }
     
     // 4. Don't update sources array - sources.id must remain as placeholder (integer suffix required)
-    // The folder_ids array tells Letta which folder to use, and Letta will resolve it
+    // The folder_ids array tells Letta which folder to use, and Letta will resolve it.
     logger.debug(
       { folderId },
       'Keeping source_ids, files.source_id, and sources.id as placeholders (folder_ids used instead)'
@@ -745,13 +975,13 @@ export class TaskProcessor {
     let folderId: string | undefined;
     
     if (this.lettaClient) {
-      logger.info({ taskId: taskPayload.task_id }, 'Setting up filesystem data from GitHub');
+      logger.info({ taskId: taskPayload.task_id }, 'Setting up filesystem data (GitHub + local files)');
       
       try {
         // Find or create folder in Letta (reuse same folder for all agents since files are the same)
         const folder = await this.lettaClient.findOrCreateFolder(
           this.FILESYSTEM_DATA_FOLDER_NAME,
-          'Filesystem data from GitHub repository'
+          'Filesystem data from GitHub repository and local validator/files directory'
         );
         
         if (!folder || !folder.id) {
@@ -768,44 +998,129 @@ export class TaskProcessor {
           'filesystem_data',
           filesDir
         );
-        
-        // Upload files to Letta folder, only if they're new or changed
-        let uploadedCount = 0;
-        let skippedCount = 0;
-        let errorCount = 0;
+
+        // Upload files from GitHub to Letta folder, only if they're new or changed
+        let githubUploadedCount = 0;
+        let githubSkippedCount = 0;
+        let githubErrorCount = 0;
         
         for (const filePath of downloadedFiles) {
           try {
             const result = await this.lettaClient.uploadFileIfChanged(folderId, filePath);
             if (result.uploaded) {
-              uploadedCount++;
+              githubUploadedCount++;
               logger.info(
-                { fileName: path.basename(filePath), folderId, reason: result.reason },
+                { source: 'github', fileName: path.basename(filePath), folderId, reason: result.reason },
                 'File uploaded to Letta folder'
               );
             } else {
-              skippedCount++;
+              githubSkippedCount++;
               logger.debug(
-                { fileName: path.basename(filePath), folderId, reason: result.reason },
+                { source: 'github', fileName: path.basename(filePath), folderId, reason: result.reason },
                 'File skipped (already exists and unchanged)'
               );
             }
           } catch (error) {
-            errorCount++;
+            githubErrorCount++;
             logger.error(
-              { error: error instanceof Error ? error.message : String(error), filePath, folderId },
+              { source: 'github', error: error instanceof Error ? error.message : String(error), filePath, folderId },
               'Failed to upload file to Letta folder'
             );
             // Continue with other files even if one fails
           }
         }
-        
+
+        // Also upload any local files from the validator/files directory into the same folder
+        let localUploadedCount = 0;
+        let localSkippedCount = 0;
+        let localErrorCount = 0;
+        let localFilesCount = 0;
+
+        try {
+          const localFilesRoot = path.resolve(process.cwd(), 'files');
+          const localExists = await fs
+            .access(localFilesRoot)
+            .then(() => true)
+            .catch(() => false);
+
+          if (localExists) {
+            const localFiles = await this.getAllFilesInDirectory(localFilesRoot);
+            localFilesCount = localFiles.length;
+
+            for (const filePath of localFiles) {
+              try {
+                const result = await this.lettaClient.uploadFileIfChanged(folderId, filePath);
+                if (result.uploaded) {
+                  localUploadedCount++;
+                  logger.info(
+                    {
+                      source: 'local',
+                      fileName: path.relative(localFilesRoot, filePath),
+                      folderId,
+                      reason: result.reason,
+                    },
+                    'File uploaded to Letta folder'
+                  );
+                } else {
+                  localSkippedCount++;
+                  logger.debug(
+                    {
+                      source: 'local',
+                      fileName: path.relative(localFilesRoot, filePath),
+                      folderId,
+                      reason: result.reason,
+                    },
+                    'File skipped (already exists and unchanged)'
+                  );
+                }
+              } catch (error) {
+                localErrorCount++;
+                logger.error(
+                  {
+                    source: 'local',
+                    error: error instanceof Error ? error.message : String(error),
+                    filePath,
+                    folderId,
+                  },
+                  'Failed to upload local file to Letta folder'
+                );
+              }
+            }
+          } else {
+            logger.info(
+              { folderId, localFilesRoot },
+              'Local validator/files directory not found, skipping local file upload'
+            );
+          }
+        } catch (error) {
+          logger.error(
+            {
+              source: 'local',
+              error: error instanceof Error ? error.message : String(error),
+              folderId,
+            },
+            'Error while processing local validator/files directory'
+          );
+        }
+
         logger.info(
-          { folderId, total: downloadedFiles.length, uploaded: uploadedCount, skipped: skippedCount, errors: errorCount },
-          'Filesystem data files processed'
+          {
+            folderId,
+            github: {
+              total: downloadedFiles.length,
+              uploaded: githubUploadedCount,
+              skipped: githubSkippedCount,
+              errors: githubErrorCount,
+            },
+            local: {
+              total: localFilesCount,
+              uploaded: localUploadedCount,
+              skipped: localSkippedCount,
+              errors: localErrorCount,
+            },
+          },
+          'Filesystem data files processed (GitHub + local)'
         );
-        
-        logger.info({ folderId, fileCount: downloadedFiles.length }, 'Filesystem data files uploaded to Letta');
       } catch (error) {
         logger.error(
           { error: error instanceof Error ? error.message : String(error), taskId: taskPayload.task_id },
@@ -904,57 +1219,25 @@ export class TaskProcessor {
       }
     }
 
-    // Download and write rubric, or create default if missing
+    // Download and write rubric (required)
     let rubricPath: string | undefined;
-    const defaultRubric = `Evaluate the AI agent's response across these dimensions:
-      **CORRECTNESS (40%)**
-      - Does the response accurately address the user's question or request?
-      - Are factual claims correct and verifiable?
-      - Does it match or align with the ground truth (if provided)?
-
-      **COMPLETENESS (25%)**
-      - Does the response fully answer all parts of the question?
-      - Is important context or detail missing?
-
-      **CLARITY & COHERENCE (20%)**
-      - Is the response well-structured and easy to understand?
-      - Is the language clear and appropriate for the context?
-
-      **HELPFULNESS (15%)**
-      - Does the response provide actionable or useful information?
-      - Is the tone appropriate and professional?
-
-      **SCORING RUBRIC:**
-      - 1.0: Exceptional - Perfect on all dimensions
-      - 0.8-0.9: Excellent - Minor improvements possible
-      - 0.6-0.7: Good - Meets expectations with some gaps
-      - 0.4-0.5: Fair - Addresses query but has notable issues
-      - 0.2-0.3: Poor - Significant problems or inaccuracies
-      - 0.0-0.1: Unacceptable - Fails to address query
-
-      Provide ONLY a numeric score between 0.0 and 1.0.
-    `.trim();
-
     rubricPath = path.join(workDir, 'rubric.txt');
-    if (taskPayload.rubric_file_path) {
-      logger.info({ taskId: taskPayload.task_id, url: taskPayload.rubric_file_path }, 'PrepareFiles: downloading rubric');
-        const rubricContent = await this.downloadFileWithBackup(
-          taskPayload.rubric_file_path,
-          (taskPayload as any).rubric_backup_file_path
-        );
-      await fs.writeFile(rubricPath, rubricContent, 'utf-8');
-      logger.info({ taskId: taskPayload.task_id, rubricPath }, 'PrepareFiles: downloaded rubric file');
-    } else {
-      await fs.writeFile(rubricPath, defaultRubric, 'utf-8');
-      logger.info({ taskId: taskPayload.task_id, rubricPath }, 'PrepareFiles: created default rubric file');
+    if (!taskPayload.rubric_file_path) {
+      throw new Error(`Rubric file path is required but not provided for task ${taskPayload.task_id}`);
     }
+    
+    logger.info({ taskId: taskPayload.task_id, url: taskPayload.rubric_file_path }, 'PrepareFiles: downloading rubric');
+    const rubricContent = await this.downloadFileWithBackup(
+      taskPayload.rubric_file_path,
+      (taskPayload as any).rubric_backup_file_path
+    );
+    await fs.writeFile(rubricPath, rubricContent, 'utf-8');
+    logger.info({ taskId: taskPayload.task_id, rubricPath }, 'PrepareFiles: downloaded rubric file');
 
     // Override base_url to use validator's configured Letta server
     let targetBaseUrl: string | undefined;
     if (process.env.LETTA_BASE_URL) {
       targetBaseUrl = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
-    } else if (process.env.LETTA_API_KEY) {
-      targetBaseUrl = 'https://api.letta.com';
     }
     
     if (targetBaseUrl && !targetBaseUrl.startsWith('http://') && !targetBaseUrl.startsWith('https://')) {
@@ -969,41 +1252,176 @@ export class TaskProcessor {
     }
 
     // Use provided suite.yaml file, but override base_url and ensure dataset path is correct
-    logger.info({ taskId: taskPayload.task_id, url: taskPayload.suite_file_path }, 'PrepareFiles: downloading suite.yaml');
+    logger.info(
+      { taskId: taskPayload.task_id, url: taskPayload.suite_file_path },
+      'PrepareFiles: downloading suite.yaml'
+    );
     const suiteYamlContent = await this.downloadFileWithBackup(
       taskPayload.suite_file_path,
       (taskPayload as any).suite_backup_file_path
     );
-    let suiteConfig = yaml.load(suiteYamlContent) as any;
+    
+    // Validate original suite.yaml can be parsed and dumped back correctly
+    // This helps catch corruption issues before we modify it
+    let suiteConfig: any;
+    try {
+      suiteConfig = yaml.load(suiteYamlContent) as any;
+      
+      // Minimal logging: just log top-level keys to avoid large payloads
+      logger.debug(
+        {
+          taskId: taskPayload.task_id,
+          parsedSuiteConfigKeys: Object.keys(suiteConfig || {}),
+        },
+        'Parsed suite.yaml config'
+      );
+      
+      // Test that we can dump and reload the original config without corruption
+      const testDump = yaml.dump(suiteConfig, {
+        lineWidth: -1,
+        quotingType: '"' as const,
+        sortKeys: false,
+      });
+      const testReload = yaml.load(testDump);
+      if (!testReload) {
+        throw new Error('Original suite.yaml cannot be round-tripped: dump->load returns null');
+      }
+      // No detailed logging for round-trip dump to avoid large logs
+    } catch (parseError) {
+      logger.error(
+        {
+          taskId: taskPayload.task_id,
+          error: parseError instanceof Error ? parseError.message : String(parseError),
+          errorStack: parseError instanceof Error ? parseError.stack : undefined,
+          suiteYamlLength: suiteYamlContent.length,
+        },
+        'Failed to parse or validate suite.yaml file'
+      );
+      throw new Error(`Failed to parse suite.yaml: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+    }
     
     if (!suiteConfig) {
-      throw new Error('Failed to parse provided suite.yaml file');
+      logger.error(
+        {
+          taskId: taskPayload.task_id,
+        },
+        'Parsed suite.yaml is null or undefined'
+      );
+      throw new Error('Failed to parse provided suite.yaml file: result is null/undefined');
     }
     
-    // Update dataset path to point to the local file if dataset was written
+    // Instead of parsing and re-dumping (which loses comments and formatting),
+    // use string replacement to preserve the original YAML structure exactly.
+    // This avoids potential issues with letta-evals expecting specific formatting.
+    let updatedYamlContent: string = suiteYamlContent;
+    
+    // Update dataset path using string replacement
     if (datasetPath) {
-      suiteConfig.dataset = path.basename(datasetPath);
+      const datasetBasename = path.basename(datasetPath);
+      // Replace dataset: ... with dataset: <basename>
+      updatedYamlContent = updatedYamlContent.replace(
+        /^dataset:\s*.+$/m,
+        `dataset: ${datasetBasename}`
+      );
     }
     
-    // Update target.base_url and agent_file
-    if (!suiteConfig.target) {
-      suiteConfig.target = {};
-    }
+    // Update target.base_url using string replacement
     if (targetBaseUrl) {
-      suiteConfig.target.base_url = targetBaseUrl;
-    }
-    if (agentFilePath) {
-      suiteConfig.target.agent_file = path.basename(agentFilePath);
+      // Replace base_url: ... with base_url: <targetBaseUrl>
+      // Use a more specific regex that matches the exact indentation pattern
+      const beforeReplace = updatedYamlContent;
+      updatedYamlContent = updatedYamlContent.replace(
+        /^(\s+base_url:\s*).+$/m,
+        `$1${targetBaseUrl}`
+      );
+      
+      // Log if replacement didn't work (small, no full content)
+      if (beforeReplace === updatedYamlContent) {
+        logger.warn(
+          {
+            taskId: taskPayload.task_id,
+            targetBaseUrl,
+          },
+          'base_url replacement did not match any line - base_url may not exist in suite.yaml'
+        );
+      }
     }
     
-    const updatedYamlContent = yaml.dump(suiteConfig);
+    // Update target.agent_file using string replacement
+    if (agentFilePath) {
+      const agentBasename = path.basename(agentFilePath);
+      // Replace agent_file: ... with agent_file: <basename>
+      updatedYamlContent = updatedYamlContent.replace(
+        /^(\s+agent_file:\s*).+$/m,
+        `$1${agentBasename}`
+      );
+    }
+    
+    logger.debug(
+      {
+        taskId: taskPayload.task_id,
+        modifications: {
+          datasetPath: datasetPath ? path.basename(datasetPath) : 'unchanged',
+          targetBaseUrl: targetBaseUrl || 'unchanged',
+          agentFile: agentFilePath ? path.basename(agentFilePath) : 'unchanged',
+        },
+      },
+      'Modified suite.yaml using string replacement'
+    );
+    
+    // Validate the updated YAML can still be parsed
+    try {
+      const validationCheck = yaml.load(updatedYamlContent);
+      if (!validationCheck) {
+        throw new Error('Updated YAML validation failed: parsed result is null/undefined');
+      }
+      // Minimal debug log for successful validation
+      logger.debug(
+        {
+          taskId: taskPayload.task_id,
+          reloadedConfigKeys: Object.keys(validationCheck || {}),
+        },
+        'Updated YAML validation passed'
+      );
+    } catch (validationError) {
+      logger.error(
+        {
+          taskId: taskPayload.task_id,
+          error: validationError instanceof Error ? validationError.message : String(validationError),
+          errorStack: validationError instanceof Error ? validationError.stack : undefined,
+            updatedYamlLength: updatedYamlContent.length,
+        },
+        'Failed to validate updated YAML - using original content as fallback'
+      );
+      // Fallback: use original content if validation fails
+      updatedYamlContent = suiteYamlContent;
+      logger.warn(
+        { taskId: taskPayload.task_id },
+        'Used original suite.yaml content due to validation failure'
+      );
+    }
+    
     await fs.writeFile(suitePath, updatedYamlContent, 'utf-8');
+    
+    // Verify the file was written correctly by reading it back (no large previews)
+    const writtenContent = await fs.readFile(suitePath, 'utf-8');
+    if (writtenContent !== updatedYamlContent) {
+      logger.error(
+        {
+          taskId: taskPayload.task_id,
+          expectedLength: updatedYamlContent.length,
+          writtenLength: writtenContent.length,
+        },
+        'Written suite.yaml content does not match expected content'
+      );
+    }
+    
     logger.info({
       taskId: taskPayload.task_id,
       suitePath,
       targetBaseUrl,
       agentFilePath: agentFilePath ? path.basename(agentFilePath) : undefined,
-      datasetPath: datasetPath ? path.basename(datasetPath) : undefined
+      datasetPath: datasetPath ? path.basename(datasetPath) : undefined,
     }, 'PrepareFiles: updated suite.yaml');
 
     return {
@@ -1146,10 +1564,7 @@ export class TaskProcessor {
       if (process.env.TOGETHERAI_API_KEY) {
         env.TOGETHERAI_API_KEY = process.env.TOGETHERAI_API_KEY;
       }
-      // Letta - support both local and cloud
-      if (process.env.LETTA_API_KEY) {
-        env.LETTA_API_KEY = process.env.LETTA_API_KEY; // For Letta Cloud
-      }
+      // Letta - only support hosted instances
       if (process.env.LETTA_BASE_URL) {
         // Strip quotes if present (common when set in docker-compose or shell scripts)
         env.LETTA_BASE_URL = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
@@ -1202,8 +1617,7 @@ export class TaskProcessor {
           logger.error(
             {
               error: '401 Unauthorized',
-              baseUrl: process.env.LETTA_BASE_URL || 'https://api.letta.com',
-              hasLettaApiKey: !!process.env.LETTA_API_KEY,
+              baseUrl: process.env.LETTA_BASE_URL || '(not set)',
               hasLettaBaseUrl: !!process.env.LETTA_BASE_URL,
               stderr: stderr.substring(0, 500), // First 500 chars
             },
@@ -1214,8 +1628,7 @@ export class TaskProcessor {
           logger.error(
             {
               error: '403 Forbidden',
-              baseUrl: process.env.LETTA_BASE_URL || 'https://api.letta.com',
-              hasLettaApiKey: !!process.env.LETTA_API_KEY,
+              baseUrl: process.env.LETTA_BASE_URL || '(not set)',
               hasLettaBaseUrl: !!process.env.LETTA_BASE_URL,
               stderr: stderr.substring(0, 500), // First 500 chars
             },
@@ -1321,7 +1734,6 @@ export class TaskProcessor {
               firstErrorDetails: errorDetails,
               lettaConfig: {
                 LETTA_BASE_URL: process.env.LETTA_BASE_URL || '(not set)',
-                LETTA_API_KEY: process.env.LETTA_API_KEY ? '***SET***' : '(not set)',
               },
             },
             'All evaluation samples failed - detailed error information'
@@ -1552,11 +1964,43 @@ export class TaskProcessor {
       // Display results and summary in console (with ticker tape effect)
       await this.displayEvaluationResults(processedResults, processedSummary);
 
+      // Save full raw evaluation output to disk for debugging/inspection
+      // This is the same structure we upload via ApiClient.uploadRawOutput.
+      const rawOutputPath = path.join(outputDir, 'raw_evaluation.json');
+      try {
+        await fs.writeFile(
+          rawOutputPath,
+          JSON.stringify(
+            {
+              summary: processedSummary,
+              results: processedResults,
+              artifacts,
+              duration_seconds: duration,
+            },
+            null,
+            2,
+          ),
+          'utf-8',
+        );
+        logger.info({ rawOutputPath }, 'Saved raw evaluation output to file');
+      } catch (writeError) {
+        logger.warn(
+          {
+            rawOutputPath,
+            error:
+              writeError instanceof Error
+                ? writeError.message
+                : String(writeError),
+          },
+          'Failed to save raw evaluation output to file',
+        );
+      }
+
       return {
         summary: processedSummary,
         results: processedResults,
         artifacts,
-        duration_seconds: duration
+        duration_seconds: duration,
       };
     } catch (error: any) {
       // Clean up MCP servers even on error
@@ -1830,9 +2274,6 @@ export class TaskProcessor {
         PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
       };
       
-      if (process.env.LETTA_API_KEY) {
-        env.LETTA_API_KEY = process.env.LETTA_API_KEY;
-      }
       if (process.env.LETTA_BASE_URL) {
         env.LETTA_BASE_URL = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
       } else if (process.env.LETTA_URL) {

@@ -13,6 +13,8 @@ import type {
   ClaimResponse,
   ResultResponse
 } from './types';
+import FormData from 'form-data';
+import * as fs from 'fs';
 
 export class ApiClient {
   private client: AxiosInstance;
@@ -332,6 +334,120 @@ export class ApiClient {
       logger.error(
         { taskId, error: error instanceof Error ? error.message : String(error) },
         'Failed to submit results'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Upload raw evaluation output file for a task
+   *
+   * Sends the raw_evaluation.json file as multipart/form-data.
+   * This avoids serializing a huge JSON payload in memory again.
+   */
+  async uploadRawOutputFile(
+    taskId: string,
+    filePath: string,
+  ): Promise<void> {
+    try {
+      logger.info(
+        {
+          taskId,
+          hotkey: this.hotkey,
+          filePath,
+        },
+        'Uploading raw evaluation output file',
+      );
+
+      const url = this.getApiPath(`/tasks/${taskId}/raw-output`);
+
+      // Sign the metadata (hotkey + taskId) for verification
+      const payload = {
+        hotkey: this.hotkey,
+        taskId,
+      };
+      const signature = signRequest(this.pair, payload);
+
+      const form = new FormData();
+      form.append('hotkey', this.hotkey);
+      form.append('file', fs.createReadStream(filePath), {
+        filename: 'raw_evaluation.json',
+        contentType: 'application/json',
+      });
+
+      const headers = {
+        ...form.getHeaders(),
+        'X-Signature': signature,
+      };
+
+      const makeRequest = async () => {
+        await this.client.post(url, form, { headers });
+      };
+
+      await retryWithCondition(
+        makeRequest,
+        this.isRetryableError.bind(this),
+        {
+          maxRetries: this.maxRetries,
+          retryDelay: this.retryDelay,
+        },
+      );
+
+      logger.info({ taskId }, 'Raw evaluation output file uploaded successfully');
+    } catch (error) {
+      logger.error(
+        {
+          taskId,
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to upload raw evaluation output file',
+      );
+      // Don't rethrow - failure to upload raw output should not block task completion
+    }
+  }
+
+  /**
+   * Fetch bittensor weights from backend for this validator's hotkey.
+   *
+   * Backend endpoint:
+   * POST /api/v2/validators/weights
+   */
+  async fetchBittensorWeights(): Promise<{
+    window_start: string;
+    window_end: string;
+    total_minutes: number;
+    weights: { uid: number; weight: number }[];
+  }> {
+    const path = '/weights';
+    const url = this.getApiPath(path);
+
+    const payload = {
+      hotkey: this.hotkey,
+    };
+
+    // Sign the payload for signature middleware
+    const signature = signRequest(this.pair, payload);
+
+    try {
+      const response = await this.client.post(url, payload, {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Signature': signature,
+        },
+      });
+
+      return response.data as {
+        window_start: string;
+        window_end: string;
+        total_minutes: number;
+        weights: { uid: number; weight: number }[];
+      };
+    } catch (error) {
+      logger.error(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to fetch bittensor weights',
       );
       throw error;
     }

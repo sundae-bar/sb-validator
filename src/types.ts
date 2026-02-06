@@ -10,6 +10,7 @@ export interface ValidatorConfig {
   capacity?: Record<string, unknown>;
   pollInterval?: number; // Poll interval in seconds (default: 5)
   heartbeatInterval?: number; // Heartbeat interval in seconds (default: 30)
+  weightsInterval?: number; // Bittensor weights fetch interval in minutes (default: 30)
   maxRetries?: number; // Max retries for failed requests (default: 3)
   retryDelay?: number; // Delay between retries in ms (default: 1000)
   logLevel?: string; // Log level (default: 'info')

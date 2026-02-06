@@ -39,6 +39,7 @@ function loadConfig(): ValidatorConfig {
     version: process.env.VERSION || '1.0.0',
     pollInterval: parseInt(process.env.POLL_INTERVAL || '5', 10),
     heartbeatInterval: parseInt(process.env.HEARTBEAT_INTERVAL || '30', 10),
+    weightsInterval: parseInt(process.env.BITTENSOR_WEIGHTS_INTERVAL_MINUTES || '30', 10),
     maxRetries: parseInt(process.env.MAX_RETRIES || '3', 10),
     retryDelay: parseInt(process.env.RETRY_DELAY || '1000', 10),
     logLevel: process.env.LOG_LEVEL || 'info'
@@ -52,35 +53,29 @@ async function main(): Promise<void> {
 
     // Load configuration
     const config = loadConfig();
-    logger.info(
+      logger.info(
       {
         apiUrl: config.apiUrl,
         displayName: config.displayName,
         version: config.version,
         pollInterval: config.pollInterval,
-        heartbeatInterval: config.heartbeatInterval
+        heartbeatInterval: config.heartbeatInterval,
+        weightsInterval: config.weightsInterval
       },
       'Configuration loaded'
     );
 
-    // Require either LETTA_BASE_URL (self-hosted) or LETTA_API_KEY (Letta Cloud)
-    const hasLettaConfig = Boolean(process.env.LETTA_BASE_URL || process.env.LETTA_API_KEY);
-
-    if (!hasLettaConfig) {
+    // Require LETTA_BASE_URL (hosted instance only)
+    if (!process.env.LETTA_BASE_URL) {
       throw new Error(
-        'No LETTA_BASE_URL or LETTA_API_KEY configured.\n' +
-        'Run the Letta server separately (see ../letta-server) and set LETTA_BASE_URL,\n' +
-        'or supply a Letta Cloud API key via LETTA_API_KEY.'
+        'No LETTA_BASE_URL configured.\n' +
+        'Run the Letta server separately (see ../letta-server) and set LETTA_BASE_URL.'
       );
     }
 
-    if (process.env.LETTA_BASE_URL) {
-      // Strip quotes if present (common when set in docker-compose or shell scripts)
-      const baseUrl = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
-      logger.info({ url: baseUrl, raw: process.env.LETTA_BASE_URL }, 'Using external Letta server');
-    } else {
-      logger.info('Using Letta Cloud via LETTA_API_KEY');
-    }
+    // Strip quotes if present (common when set in docker-compose or shell scripts)
+    const baseUrl = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
+    logger.info({ url: baseUrl, raw: process.env.LETTA_BASE_URL }, 'Using external Letta server');
 
     // Create and start validator
     const validator = new Validator(config);

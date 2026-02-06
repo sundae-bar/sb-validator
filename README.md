@@ -85,16 +85,6 @@ docker run --rm \
   sundae-bar-validator:latest
 ```
 
-**Example with Letta Cloud:**
-
-```bash
-docker run --rm \
-  --env-file .env \
-  -e LETTA_API_KEY="your-letta-cloud-key" \
-  -e OPENAI_API_KEY="sk-..." \
-  -e ANTHROPIC_API_KEY="sk-ant-..." \
-  sundae-bar-validator:latest
-```
 
 ## Configuration
 
@@ -202,25 +192,6 @@ docker run --rm \
 ```
 
 
-#### Letta Cloud
-
-Use Letta's managed service:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `LETTA_API_KEY` | Yes | Letta Cloud API key |
-
-**Example:**
-```bash
-docker run --rm \
-  -e MNEMONIC="..." \
-  -e API_URL="http://localhost:3002/api/v2/validators" \
-  -e LETTA_API_KEY="your-cloud-key" \
-  -e OPENAI_API_KEY="sk-..." \
-  sundae-bar-validator:latest
-```
-
-If both `LETTA_API_KEY` and `LETTA_BASE_URL` are provided, Letta Cloud (API key) takes precedence.
 
 ## How It Works
 
@@ -255,12 +226,7 @@ There are two supported ways to provide a Letta server:
    - Copy `env.letta.example` → `.env.letta`, fill in your model API keys, then run `docker compose up -d`.  
    - Set `LETTA_BASE_URL` (e.g., `http://host.docker.internal:8283` or `http://your-server:8283`) when launching the validator container.
 
-2. **Letta Cloud**  
-   - Create an API key in the Letta dashboard.  
-   - Set `LETTA_API_KEY` for the validator. No local Letta server is required.  
-   - Model API keys for agents live inside your Letta Cloud account.
-
-In both cases, graders still need their own API keys in the validator environment (OpenAI, Anthropic, etc.) so `letta-evals` can call the requested judge models.
+Graders still need their own API keys in the validator environment (OpenAI, Anthropic, etc.) so `letta-evals` can call the requested judge models.
 
 ## Security
 

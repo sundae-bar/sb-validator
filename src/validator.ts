@@ -18,11 +18,13 @@ export class Validator {
   private evaluatorId: string | null = null;
   private running: boolean = false;
   private heartbeatInterval: NodeJS.Timeout | null = null;
+  private weightsInterval: NodeJS.Timeout | null = null;
 
   constructor(config: ValidatorConfig) {
     this.config = {
       pollInterval: 5,
       heartbeatInterval: 30,
+      weightsInterval: 30,
       maxRetries: 3,
       retryDelay: 1000,
       logLevel: 'info',
@@ -122,6 +124,53 @@ export class Validator {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
       logger.info('Heartbeat stopped');
+    }
+  }
+
+  /**
+   * Start weights fetch loop
+   */
+  private startWeights(): void {
+    if (this.weightsInterval) {
+      clearInterval(this.weightsInterval);
+    }
+
+    const interval = (this.config.weightsInterval || 30) * 60 * 1000; // Convert minutes to milliseconds
+
+    this.weightsInterval = setInterval(async () => {
+      if (this.apiClient && this.running) {
+        try {
+          const weights = await this.apiClient.fetchBittensorWeights();
+          logger.info(
+            {
+              window_start: weights.window_start,
+              window_end: weights.window_end,
+              total_minutes: weights.total_minutes,
+              weights_count: weights.weights.length,
+              weights: weights.weights.map(w => ({ uid: w.uid, weight: w.weight })),
+            },
+            'Fetched bittensor weights (logging only, not setting weights yet)'
+          );
+        } catch (error) {
+          logger.error(
+            { error: error instanceof Error ? error.message : String(error) },
+            'Failed to fetch bittensor weights (will retry on next interval)'
+          );
+        }
+      }
+    }, interval);
+
+    logger.info({ intervalMinutes: this.config.weightsInterval || 30 }, 'Weights fetch started');
+  }
+
+  /**
+   * Stop weights fetch loop
+   */
+  private stopWeights(): void {
+    if (this.weightsInterval) {
+      clearInterval(this.weightsInterval);
+      this.weightsInterval = null;
+      logger.info('Weights fetch stopped');
     }
   }
 
@@ -260,6 +309,9 @@ export class Validator {
       // Start heartbeat
       this.startHeartbeat();
 
+      // Start weights fetch loop
+      this.startWeights();
+
       // Start polling loop - this will run indefinitely until this.running = false
       // The loop handles all errors internally and keeps running
       await this.pollLoop();
@@ -280,6 +332,7 @@ export class Validator {
     logger.info('Stopping validator...');
     this.running = false;
     this.stopHeartbeat();
+    this.stopWeights();
     logger.info('Validator stopped');
   }
 

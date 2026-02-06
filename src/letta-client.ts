@@ -28,18 +28,12 @@ export interface FileMetadata {
 export class LettaClient {
   private client: AxiosInstance;
   private baseUrl: string;
-  private apiKey?: string;
 
-  constructor(baseUrl?: string, apiKey?: string) {
-    // Determine base URL
-    if (apiKey) {
-      this.baseUrl = baseUrl || 'https://api.letta.com';
-      this.apiKey = apiKey;
-    } else {
-      this.baseUrl = baseUrl || process.env.LETTA_BASE_URL || 'http://localhost:8283';
-      if (!this.baseUrl) {
-        throw new Error('Either LETTA_BASE_URL or LETTA_API_KEY must be provided');
-      }
+  constructor(baseUrl?: string) {
+    // Determine base URL (only support hosted instances)
+    this.baseUrl = baseUrl || process.env.LETTA_BASE_URL || 'http://localhost:8283';
+    if (!this.baseUrl) {
+      throw new Error('LETTA_BASE_URL must be provided');
     }
 
     // Remove trailing slash
@@ -52,11 +46,6 @@ export class LettaClient {
         'Content-Type': 'application/json'
       }
     });
-
-    // Add authentication header if API key is provided
-    if (this.apiKey) {
-      this.client.defaults.headers.common['Authorization'] = `Bearer ${this.apiKey}`;
-    }
 
     // Add request interceptor for logging
     this.client.interceptors.request.use(
@@ -167,13 +156,28 @@ export class LettaClient {
       // Log full response for debugging
       logger.debug({ responseData: response.data, responseStatus: response.status }, 'Folder creation response');
       
-      if (!response.data || !response.data.id) {
-        logger.error({ responseData: response.data }, 'Folder creation response missing id field');
+      // Handle case where API returns an array instead of a single object
+      let folderData: Folder;
+      if (Array.isArray(response.data)) {
+        logger.warn(
+          { arrayLength: response.data.length, firstItem: response.data[0] },
+          'Folder creation API returned array instead of single object, using first item'
+        );
+        if (response.data.length === 0) {
+          throw new Error('Folder creation API returned empty array');
+        }
+        folderData = response.data[0];
+      } else {
+        folderData = response.data;
+      }
+      
+      if (!folderData || !folderData.id) {
+        logger.error({ responseData: response.data, folderData }, 'Folder creation response missing id field');
         throw new Error(`Folder creation response missing id field: ${JSON.stringify(response.data)}`);
       }
 
-      logger.info({ folderId: response.data.id, name }, 'Folder created successfully');
-      return response.data;
+      logger.info({ folderId: folderData.id, name }, 'Folder created successfully');
+      return folderData;
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
@@ -251,8 +255,7 @@ export class LettaClient {
             duplicate_handling: duplicateHandling
           },
           headers: {
-            ...formData.getHeaders(),
-            ...(this.apiKey ? { 'Authorization': `Bearer ${this.apiKey}` } : {})
+            ...formData.getHeaders()
           },
           maxContentLength: Infinity,
           maxBodyLength: Infinity
