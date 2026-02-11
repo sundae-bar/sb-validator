@@ -35,6 +35,7 @@ export class TaskProcessor {
   private maxConcurrentTasks: number;
   private lettaClient: LettaClient | null = null;
   private weightsIntervalMs: number;
+  private filesystemDataFolderId: string | null = null; // Cache folder ID to avoid lookup every time
   constructor(
     apiClient: ApiClient,
     workDir: string = '/tmp/validator-work',
@@ -802,8 +803,7 @@ export class TaskProcessor {
       ? agent.source_ids[0] 
       : 'source-0';
     
-    // 1. Update folder_ids instead of source_ids (source_ids is deprecated and requires integer suffixes)
-    // folder_ids accepts the actual folder ID from Letta
+    // 1. Force folder_ids to contain the real Letta folder ID (full control over which folder is used)
     if (!agent.folder_ids) {
       agent.folder_ids = [];
     }
@@ -811,68 +811,62 @@ export class TaskProcessor {
       logger.warn({ taskId }, 'folder_ids is not an array, converting');
       agent.folder_ids = Array.isArray(agent.folder_ids) ? agent.folder_ids : [agent.folder_ids].filter(Boolean);
     }
-    
-    // Add folder ID to folder_ids if not already present
     if (!agent.folder_ids.includes(folderId)) {
       agent.folder_ids.push(folderId);
       updated = true;
-      logger.info({ folderId, folderIdsCount: agent.folder_ids.length }, 'Added folder ID to folder_ids array');
     }
-    
-    // Keep source_ids as placeholders (don't update them - they require integer suffixes)
-    // Letta will use folder_ids instead
     logger.info(
       { folderId, folderIdsCount: agent.folder_ids.length, sourceIdsCount: agent.source_ids?.length || 0 },
-      'Updated folder_ids array (source_ids kept as placeholders)'
+      'Updated folder_ids array for agent (source_ids kept as placeholders)'
     );
-    
-    // 2. Update files_agents array - reset state but keep source_id as placeholder.
-    // Then minimize: clear files_agents so we don't encode a specific file list in the agent file.
-    if (agent.files_agents && Array.isArray(agent.files_agents) && agent.files_agents.length > 0) {
-      let filesAgentsUpdated = 0;
-      for (const fileAgent of agent.files_agents) {
-        // Only reset state fields, don't update source_id (it must stay as placeholder)
-        if (fileAgent.is_open !== false || fileAgent.visible_content !== null) {
-          fileAgent.is_open = false;
-          fileAgent.visible_content = null;
-          filesAgentsUpdated++;
-          updated = true;
-        }
-      }
-      if (filesAgentsUpdated > 0) {
-        logger.info(
-          { 
-            folderId, 
-            filesAgentsUpdated, 
-            totalFiles: agent.files_agents.length
-          },
-          'Reset files_agents state (is_open=false, visible_content=null) - source_id kept as placeholder'
-        );
-      }
 
-      // Now remove per-file mappings to avoid mismatches with the actual folder contents.
-      agent.files_agents = [];
-      updated = true;
-      logger.info(
-        { folderId },
-        'Cleared agents[0].files_agents to avoid encoding a fixed file list in the agent file'
-      );
-    } else {
-      logger.debug({ folderId }, 'files_agents array missing or empty, skipping update');
-    }
-    
-    // 3. Minimize root-level files array as well: keep schema-valid but empty so it
-    //    does not drift from the real folder contents.
-    if (Array.isArray(agentData.files) && agentData.files.length > 0) {
-      agentData.files = [];
-      updated = true;
-      logger.info(
-        { folderId },
-        'Cleared root files[] array to avoid mismatches with folder-backed filesystem data'
-      );
-    }
-    
-    // 4. Don't update sources array - sources.id must remain as placeholder (integer suffix required)
+    // 2. Overwrite files/files_agents with our canonical policy files so users cannot control attachments
+    const canonicalFiles = [
+      { id: 'file-0', file_name: 'filesystem_data/approval_workflows.md', original_file_name: 'approval_workflows.md' },
+      { id: 'file-1', file_name: 'filesystem_data/client_tiers.json', original_file_name: 'client_tiers.json' },
+      { id: 'file-2', file_name: 'filesystem_data/escalation_matrix.md', original_file_name: 'escalation_matrix.md' },
+      { id: 'file-3', file_name: 'filesystem_data/travel_expense_policy.md', original_file_name: 'travel_expense_policy.md' },
+      { id: 'file-4', file_name: 'filesystem_data/pto_policy.md', original_file_name: 'pto_policy.md' },
+      { id: 'file-5', file_name: 'filesystem_data/org_chart.json', original_file_name: 'org_chart.json' },
+    ] as const;
+
+    const nowIso = new Date().toISOString();
+    const agentId = agent.id || 'agent-0';
+
+    // Root-level files[]: define only our canonical files; other user-specified files are ignored
+    agentData.files = canonicalFiles.map((f) => ({
+      source_id: originalSourceId,
+      file_name: f.file_name,
+      original_file_name: f.original_file_name,
+      file_path: null,
+      file_type: null,
+      file_size: null,
+      file_creation_date: null,
+      file_last_modified_date: null,
+      processing_status: 'completed',
+      error_message: null,
+      total_chunks: null,
+      chunks_embedded: null,
+      content: null,
+      id: f.id,
+    }));
+
+    // files_agents[]: one entry per canonical file, closed by default
+    agent.files_agents = canonicalFiles.map((f, index) => ({
+      agent_id: agentId,
+      file_id: f.id,
+      source_id: originalSourceId,
+      file_name: f.file_name,
+      is_open: false,
+      visible_content: '',
+      last_accessed_at: nowIso,
+      start_line: null,
+      end_line: null,
+      id: `file_agent-${index}`,
+    }));
+    updated = true;
+
+    // 3. Don't update sources array - sources.id must remain as placeholder (integer suffix required)
     // The folder_ids array tells Letta which folder to use, and Letta will resolve it.
     logger.debug(
       { folderId },
@@ -971,25 +965,36 @@ export class TaskProcessor {
     // Download and write agent file
     logger.info({ taskId: taskPayload.task_id, workDir }, 'PrepareFiles: start');
 
-    // Always set up filesystem data from GitHub for all agents
+    // Set up filesystem data from GitHub for all agents
+    // We always check files, but only upload if they've changed
     let folderId: string | undefined;
+    let filesWereUploaded = false; // Track if any files were actually uploaded
     
     if (this.lettaClient) {
-      logger.info({ taskId: taskPayload.task_id }, 'Setting up filesystem data (GitHub + local files)');
-      
       try {
         // Find or create folder in Letta (reuse same folder for all agents since files are the same)
-        const folder = await this.lettaClient.findOrCreateFolder(
-          this.FILESYSTEM_DATA_FOLDER_NAME,
-          'Filesystem data from GitHub repository and local validator/files directory'
-        );
-        
-        if (!folder || !folder.id) {
-          throw new Error(`Folder creation returned invalid response: ${JSON.stringify(folder)}`);
+        // Cache folder ID to avoid lookup every time
+        if (this.filesystemDataFolderId) {
+          folderId = this.filesystemDataFolderId;
+          logger.debug(
+            { taskId: taskPayload.task_id, folderId },
+            'Using cached filesystem data folder ID'
+          );
+        } else {
+          logger.info({ taskId: taskPayload.task_id }, 'Finding or creating filesystem data folder');
+          const folder = await this.lettaClient.findOrCreateFolder(
+            this.FILESYSTEM_DATA_FOLDER_NAME,
+            'Filesystem data from GitHub repository and local validator/files directory'
+          );
+          
+          if (!folder || !folder.id) {
+            throw new Error(`Folder creation returned invalid response: ${JSON.stringify(folder)}`);
+          }
+          
+          folderId = folder.id;
+          this.filesystemDataFolderId = folderId; // Cache it
+          logger.info({ folderId, folderName: folder.name }, 'Folder ID obtained for filesystem data');
         }
-        
-        folderId = folder.id;
-        logger.info({ folderId, folderName: folder.name }, 'Folder ID obtained for filesystem data');
         
         // Download files from GitHub
         const filesDir = path.join(workDir, 'filesystem_data');
@@ -1009,6 +1014,7 @@ export class TaskProcessor {
             const result = await this.lettaClient.uploadFileIfChanged(folderId, filePath);
             if (result.uploaded) {
               githubUploadedCount++;
+              filesWereUploaded = true; // Track that we uploaded something
               logger.info(
                 { source: 'github', fileName: path.basename(filePath), folderId, reason: result.reason },
                 'File uploaded to Letta folder'
@@ -1052,6 +1058,7 @@ export class TaskProcessor {
                 const result = await this.lettaClient.uploadFileIfChanged(folderId, filePath);
                 if (result.uploaded) {
                   localUploadedCount++;
+                  filesWereUploaded = true; // Track that we uploaded something
                   logger.info(
                     {
                       source: 'local',
@@ -1121,12 +1128,223 @@ export class TaskProcessor {
           },
           'Filesystem data files processed (GitHub + local)'
         );
-      } catch (error) {
-        logger.error(
-          { error: error instanceof Error ? error.message : String(error), taskId: taskPayload.task_id },
-          'Failed to set up filesystem data from GitHub'
+
+        // Log all files currently in the Letta folder (helps debug file names / paths)
+        try {
+          const filesInFolder = await this.lettaClient.listFilesInFolder(folderId);
+          logger.info(
+            {
+              folderId,
+              filesCount: filesInFolder.length,
+              files: filesInFolder.map(f => ({
+                id: f.id,
+                name: f.name,
+                file_name: f.file_name,
+                original_file_name: f.original_file_name,
+                size: f.size,
+                processing_status: f.processing_status,
+                total_chunks: f.total_chunks,
+                chunks_embedded: f.chunks_embedded,
+              })),
+            },
+            'Letta folder files listing (post-upload)'
+          );
+        } catch (listError) {
+          logger.warn(
+            {
+              folderId,
+              error: listError instanceof Error ? listError.message : String(listError),
+            },
+            'Failed to list files in Letta folder for debugging'
+          );
+        }
+
+        logger.info(
+          {
+            taskId: taskPayload.task_id,
+            folderId,
+            filesWereUploaded,
+            githubUploaded: githubUploadedCount,
+            githubSkipped: githubSkippedCount,
+            localUploaded: localUploadedCount,
+            localSkipped: localSkippedCount
+          },
+          filesWereUploaded 
+            ? 'Files were uploaded/changed - will wait for embeddings'
+            : 'No files were uploaded (all unchanged) - skipping embedding wait'
         );
-        // Don't fail the entire task, but log the error
+      } catch (error) {
+          logger.error(
+            {
+              error: error instanceof Error ? error.message : String(error),
+              taskId: taskPayload.task_id
+            },
+            'Failed to initialize filesystem data'
+          );
+          throw error;
+        }
+
+      // Verify files are actually available in the folder and wait for embeddings to complete
+      // Only wait if we actually uploaded new/changed files
+      if (folderId && this.lettaClient) {
+        if (!filesWereUploaded) {
+          // No files were uploaded, so existing files are already embedded - skip wait
+          logger.debug(
+            { folderId, taskId: taskPayload.task_id },
+            'Skipping embedding wait - no files were uploaded (all unchanged)'
+          );
+        } else {
+          // Files were uploaded/changed - wait for embeddings to complete
+          logger.info(
+            { folderId, taskId: taskPayload.task_id },
+            'Files were uploaded/changed - waiting for embeddings to complete'
+          );
+          try {
+            // Increase default wait to 30 minutes unless overridden
+            const maxWaitMinutes = parseInt(process.env.LETTA_EMBEDDING_WAIT_MINUTES || '30', 10);
+            const pollIntervalMs = 5000; // Poll every 5 seconds
+            const maxWaitMs = maxWaitMinutes * 60 * 1000;
+            const startTime = Date.now();
+
+            let allFilesReady = false;
+            let attemptCount = 0;
+            let initialCheck = true;
+
+            while (!allFilesReady && (Date.now() - startTime) < maxWaitMs) {
+              attemptCount++;
+              const filesInFolder = await this.lettaClient.listFilesInFolder(folderId);
+
+              if (filesInFolder.length === 0) {
+                logger.warn(
+                  { folderId, attempt: attemptCount },
+                  'No files found in Letta folder - waiting for files to appear'
+                );
+                await setTimeoutPromise(pollIntervalMs);
+                continue;
+              }
+
+              // Check embedding status for each file
+              const statusCounts = {
+                pending: 0,
+                parsing: 0,
+                embedding: 0,
+                completed: 0,
+                error: 0,
+                unknown: 0
+              };
+
+              const filesNotReady: Array<{ name: string; status: string; chunks?: string }> = [];
+              const filesWithErrors: Array<{ name: string; error: string }> = [];
+
+              for (const file of filesInFolder) {
+                const status = file.processing_status || 'unknown';
+                const displayName =
+                  (file as any).file_name ||
+                  (file as any).original_file_name ||
+                  (file as any).name ||
+                  'unknown';
+                statusCounts[status as keyof typeof statusCounts] = (statusCounts[status as keyof typeof statusCounts] || 0) + 1;
+
+                if (status === 'error') {
+                  filesWithErrors.push({
+                    name: displayName,
+                    error: file.error_message || 'Unknown error'
+                  });
+                } else if (status !== 'completed' && status !== 'unknown') {
+                  const chunksInfo = file.total_chunks && file.chunks_embedded !== undefined
+                    ? `${file.chunks_embedded}/${file.total_chunks}`
+                    : undefined;
+                  filesNotReady.push({
+                    name: displayName,
+                    status,
+                    chunks: chunksInfo
+                  });
+                }
+              }
+
+              if (filesWithErrors.length > 0) {
+                logger.error(
+                  {
+                    folderId,
+                    filesWithErrors: filesWithErrors.slice(0, 5),
+                    allErrorsLogged: filesWithErrors.length <= 5
+                  },
+                  'ERROR: Some files failed embedding - evaluation may be affected'
+                );
+                // Continue anyway - don't block on errors, but log them
+              }
+
+              if (filesNotReady.length === 0) {
+                allFilesReady = true;
+                if (initialCheck) {
+                  // All files were already completed - no waiting needed
+                  logger.info(
+                    {
+                      folderId,
+                      filesCount: filesInFolder.length,
+                      statusCounts
+                    },
+                    'All files are already completed and ready for semantic search (no wait needed)'
+                  );
+                } else {
+                  // Files completed during our wait
+                  logger.info(
+                    {
+                      folderId,
+                      filesCount: filesInFolder.length,
+                      statusCounts,
+                      waitTimeSeconds: Math.round((Date.now() - startTime) / 1000),
+                      attempts: attemptCount
+                    },
+                    'All files are completed and ready for semantic search'
+                  );
+                }
+              } else {
+                const elapsedSeconds = Math.round((Date.now() - startTime) / 1000);
+                initialCheck = false;
+
+                // Log less frequently to avoid noisy logs: on first check and then every 30 seconds
+                if (elapsedSeconds % 30 === 0) {
+                  logger.info(
+                    {
+                      folderId,
+                      filesCount: filesInFolder.length,
+                      statusCounts,
+                      filesNotReadyCount: filesNotReady.length,
+                      filesNotReady: filesNotReady.slice(0, 5), // Log first 5 files not ready
+                      elapsedSeconds,
+                      maxWaitMinutes
+                    },
+                    `Waiting for file embeddings to complete (${filesNotReady.length} file(s) still processing)`
+                  );
+                }
+
+                // Wait before next poll
+                await setTimeoutPromise(pollIntervalMs);
+              }
+            }
+
+            if (!allFilesReady) {
+              const elapsedSeconds = Math.round((Date.now() - startTime) / 1000);
+              logger.warn(
+                {
+                  folderId,
+                  elapsedSeconds,
+                  maxWaitMinutes
+                },
+                `WARNING: Timed out waiting for file embeddings (${maxWaitMinutes} minutes) - proceeding with evaluation anyway. Some files may not be searchable yet.`
+              );
+            }
+          } catch (error) {
+            logger.warn(
+              {
+                error: error instanceof Error ? error.message : String(error),
+                folderId
+              },
+              'Failed to check file embedding status (continuing anyway)'
+            );
+          }
+        }
       }
     }
 
@@ -1146,13 +1364,59 @@ export class TaskProcessor {
       // If we have a folder_id, update the agent file to reference it
       if (folderId) {
         try {
+          const originalContent = agentContent;
           agentContent = this.updateAgentFileWithFolderId(agentContent, folderId, taskPayload.task_id);
+          
+          // Verify folder_id was actually set in the agent file
+          try {
+            const agentData = JSON.parse(agentContent);
+            const agent = agentData.agents?.[0];
+            if (agent) {
+              const hasFolderId = agent.folder_ids?.includes(folderId) || 
+                                  agent.source_ids?.some((sid: any) => sid === folderId) ||
+                                  agent.sources?.some((src: any) => src.id === folderId);
+              
+              if (hasFolderId) {
+                logger.info(
+                  {
+                    taskId: taskPayload.task_id,
+                    folderId,
+                    folderIds: agent.folder_ids,
+                    sourceIds: agent.source_ids,
+                    sourcesCount: agent.sources?.length
+                  },
+                  'Verified folder_id is set in agent file'
+                );
+              } else {
+                logger.warn(
+                  {
+                    taskId: taskPayload.task_id,
+                    folderId,
+                    folderIds: agent.folder_ids,
+                    sourceIds: agent.source_ids,
+                    sourcesCount: agent.sources?.length
+                  },
+                  'WARNING: folder_id may not be correctly set in agent file - agent may not be able to access files'
+                );
+              }
+            }
+          } catch (verifyError) {
+            logger.warn(
+              { error: verifyError instanceof Error ? verifyError.message : String(verifyError), taskId: taskPayload.task_id },
+              'Failed to verify folder_id in updated agent file'
+            );
+          }
         } catch (error) {
           logger.warn(
             { error: error instanceof Error ? error.message : String(error), taskId: taskPayload.task_id },
             'Failed to update agent file with folder ID (agent file may not be valid JSON or have unexpected structure)'
           );
         }
+      } else {
+        logger.warn(
+          { taskId: taskPayload.task_id },
+          'No folder_id available - agent will not have access to filesystem data files'
+        );
       }
       
       agentFilePath = path.join(workDir, agentFileName);

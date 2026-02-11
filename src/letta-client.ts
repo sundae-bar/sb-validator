@@ -23,6 +23,13 @@ export interface FileMetadata {
   created_at: string;
   size?: number;
   updated_at?: string;
+  processing_status?: 'pending' | 'parsing' | 'embedding' | 'completed' | 'error';
+  total_chunks?: number;
+  chunks_embedded?: number;
+  error_message?: string;
+  // Optional fields returned by Letta for files
+  file_name?: string;
+  original_file_name?: string;
 }
 
 export class LettaClient {

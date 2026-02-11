@@ -9,6 +9,7 @@ import { TaskProcessor } from './task-processor';
 import { sleep } from './retry';
 import logger from './logger';
 import type { ValidatorConfig, Task } from './types';
+import { submitSn121Weights, type BittensorWeightTarget } from './weights';
 
 export class Validator {
   private config: ValidatorConfig;
@@ -141,20 +142,62 @@ export class Validator {
       if (this.apiClient && this.running) {
         try {
           const weights = await this.apiClient.fetchBittensorWeights();
+
           logger.info(
             {
               window_start: weights.window_start,
               window_end: weights.window_end,
               total_minutes: weights.total_minutes,
               weights_count: weights.weights.length,
-              weights: weights.weights.map(w => ({ uid: w.uid, weight: w.weight })),
+              weights: weights.weights.map((w) => ({ uid: w.uid, weight: w.weight })),
             },
-            'Fetched bittensor weights (logging only, not setting weights yet)'
+            'Fetched bittensor weights from coordinator',
           );
+
+          const weightsDisabled = process.env.BITTENSOR_WEIGHTS_DISABLED === 'true';
+          if (weightsDisabled) {
+            logger.info(
+              {
+                reason: 'BITTENSOR_WEIGHTS_DISABLED env var is set to true',
+              },
+              'Skipping on-chain bittensor setWeights submission',
+            );
+            return;
+          }
+
+          const validatorSecret = (process.env.BITTENSOR_VALIDATOR_SECRET || '').trim();
+          if (!validatorSecret) {
+            logger.warn(
+              {
+                envVar: 'BITTENSOR_VALIDATOR_SECRET',
+              },
+              'BITTENSOR_VALIDATOR_SECRET is not set; skipping on-chain bittensor setWeights submission',
+            );
+            return;
+          }
+
+          const targets: BittensorWeightTarget[] = weights.weights.map((w) => ({
+            uid: w.uid,
+            weight: w.weight,
+          }));
+
+          try {
+            await submitSn121Weights(targets, {
+              validatorSecret,
+            });
+          } catch (submitError) {
+            logger.error(
+              {
+                error:
+                  submitError instanceof Error ? submitError.message : String(submitError),
+              },
+              'Failed to submit bittensor weights on-chain via setWeights',
+            );
+          }
         } catch (error) {
           logger.error(
             { error: error instanceof Error ? error.message : String(error) },
-            'Failed to fetch bittensor weights (will retry on next interval)'
+            'Failed to fetch bittensor weights (will retry on next interval)',
           );
         }
       }
