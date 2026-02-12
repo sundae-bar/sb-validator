@@ -140,8 +140,23 @@ export class Validator {
 
     this.weightsInterval = setInterval(async () => {
       if (this.apiClient && this.running) {
+        const weightsFetchStartTime = Date.now();
+        logger.info(
+          {
+            intervalMinutes: this.config.weightsInterval || 30,
+            hotkey: this.hotkey,
+          },
+          'Starting weights fetch cycle'
+        );
+
         try {
+          logger.debug('Fetching bittensor weights from coordinator API...');
           const weights = await this.apiClient.fetchBittensorWeights();
+          const fetchTime = Date.now() - weightsFetchStartTime;
+
+          // Calculate weight sum for validation
+          const weightSum = weights.weights.reduce((sum, w) => sum + w.weight, 0);
+          const weightSumRounded = Math.round(weightSum * 1000000) / 1000000;
 
           logger.info(
             {
@@ -149,16 +164,41 @@ export class Validator {
               window_end: weights.window_end,
               total_minutes: weights.total_minutes,
               weights_count: weights.weights.length,
+              weightSum: weightSumRounded,
+              expectedSum: 1.0,
+              weightSumDifference: Math.abs(weightSumRounded - 1.0),
+              fetchTimeMs: fetchTime,
               weights: weights.weights.map((w) => ({ uid: w.uid, weight: w.weight })),
             },
             'Fetched bittensor weights from coordinator',
           );
 
+          // Validate weight sum
+          if (Math.abs(weightSumRounded - 1.0) > 0.01) {
+            logger.warn(
+              {
+                weightSum: weightSumRounded,
+                expectedSum: 1.0,
+                difference: Math.abs(weightSumRounded - 1.0),
+              },
+              'WARNING: Weight sum does not equal 1.0 (may cause issues on-chain)'
+            );
+          }
+
           const weightsDisabled = process.env.BITTENSOR_WEIGHTS_DISABLED === 'true';
+          logger.debug(
+            {
+              BITTENSOR_WEIGHTS_DISABLED: process.env.BITTENSOR_WEIGHTS_DISABLED,
+              weightsDisabled,
+            },
+            'Checking if weights submission is disabled'
+          );
+
           if (weightsDisabled) {
             logger.info(
               {
                 reason: 'BITTENSOR_WEIGHTS_DISABLED env var is set to true',
+                weightsCount: weights.weights.length,
               },
               'Skipping on-chain bittensor setWeights submission',
             );
@@ -166,10 +206,20 @@ export class Validator {
           }
 
           const validatorSecret = (process.env.BITTENSOR_VALIDATOR_SECRET || '').trim();
+          logger.debug(
+            {
+              hasValidatorSecret: !!validatorSecret,
+              validatorSecretLength: validatorSecret.length,
+              validatorSecretPrefix: validatorSecret.substring(0, 10) + '...',
+            },
+            'Checking validator secret'
+          );
+
           if (!validatorSecret) {
             logger.warn(
               {
                 envVar: 'BITTENSOR_VALIDATOR_SECRET',
+                weightsCount: weights.weights.length,
               },
               'BITTENSOR_VALIDATOR_SECRET is not set; skipping on-chain bittensor setWeights submission',
             );
@@ -181,25 +231,63 @@ export class Validator {
             weight: w.weight,
           }));
 
+          logger.info(
+            {
+              targetsCount: targets.length,
+              targetsSample: targets.slice(0, 10),
+              totalWeight: Math.round(targets.reduce((sum, t) => sum + t.weight, 0) * 1000000) / 1000000,
+            },
+            'Prepared weight targets for on-chain submission'
+          );
+
+          const submissionStartTime = Date.now();
           try {
+            logger.info('Calling submitSn121Weights...');
             await submitSn121Weights(targets, {
               validatorSecret,
             });
+            const submissionTime = Date.now() - submissionStartTime;
+            logger.info(
+              {
+                submissionTimeMs: submissionTime,
+                totalCycleTimeMs: Date.now() - weightsFetchStartTime,
+                targetsCount: targets.length,
+              },
+              'Successfully submitted bittensor weights on-chain'
+            );
           } catch (submitError) {
+            const submissionTime = Date.now() - submissionStartTime;
             logger.error(
               {
                 error:
                   submitError instanceof Error ? submitError.message : String(submitError),
+                errorStack: submitError instanceof Error ? submitError.stack : undefined,
+                submissionTimeMs: submissionTime,
+                totalCycleTimeMs: Date.now() - weightsFetchStartTime,
+                targetsCount: targets.length,
               },
               'Failed to submit bittensor weights on-chain via setWeights',
             );
           }
         } catch (error) {
+          const totalTime = Date.now() - weightsFetchStartTime;
           logger.error(
-            { error: error instanceof Error ? error.message : String(error) },
+            {
+              error: error instanceof Error ? error.message : String(error),
+              errorStack: error instanceof Error ? error.stack : undefined,
+              totalTimeMs: totalTime,
+            },
             'Failed to fetch bittensor weights (will retry on next interval)',
           );
         }
+      } else {
+        logger.debug(
+          {
+            hasApiClient: !!this.apiClient,
+            running: this.running,
+          },
+          'Skipping weights fetch (validator not running or API client not available)'
+        );
       }
     }, interval);
 
