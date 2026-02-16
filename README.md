@@ -5,26 +5,19 @@ Secure validator client for Sundae Bar SN121 subnet. This validator polls for ev
 ## Features
 
 - ✅ **Secure Authentication**: Hotkey-based signature authentication
+- ✅ **Task Processing**: Polls, claims, and evaluates agent submissions
+- ✅ **Bittensor Integration**: Submits weights to Bittensor subnet 121 based on leader performance
 - ✅ **Robust Error Handling**: Comprehensive retry logic with exponential backoff
-- ✅ **Health Monitoring**: Automatic heartbeats to maintain online status
+- ✅ **Health Monitoring**: Automatic heartbeats and HTTP health endpoints
 - ✅ **Production Ready**: Dockerized, non-root user, health checks
 - ✅ **Structured Logging**: Pino-based logging with configurable levels
 - ✅ **Graceful Shutdown**: Handles SIGTERM/SIGINT properly
 
 ## Quick Start
 
-### 1. Generate Keys
+### 1. Configure Environment
 
-First, generate a mnemonic and hotkey:
-
-```bash
-cd ../sn121
-npm run generate-keys
-```
-
-Save the mnemonic securely - you'll need it to run the validator.
-
-### 2. Configure Environment
+You'll need your **existing Bittensor validator hotkey mnemonic**. This is the same mnemonic you use for your Bittensor validator on subnet 121.
 
 Copy `.env.example` to `.env`:
 
@@ -33,8 +26,9 @@ cp .env.example .env
 ```
 
 Edit `.env` and set:
-- `MNEMONIC`: Your mnemonic phrase
-- `API_URL`: Coordinator API URL (e.g., `http://localhost:3002` or `http://localhost:3002/api/v2/validators`)
+- `MNEMONIC`: Your **Bittensor validator hotkey mnemonic** (the same 12-word phrase you use for subnet 121)
+- `API_URL`: Coordinator API URL (e.g., `https://api.sundaebar.ai/api/v2/validators`)
+- `LETTA_BASE_URL`: Your Letta server URL
 
 ### 3. Run Locally
 
@@ -45,12 +39,29 @@ npm run dev
 
 ### 4. Build and Run with Docker
 
+**Option A: Using the deployment script (recommended)**
+
+```bash
+# Make script executable (first time only)
+chmod +x scripts/deploy.sh
+
+# Run deployment script
+./scripts/deploy.sh
+```
+
+The script will:
+- Check that `.env` file exists and is configured
+- Build the Docker image
+- Optionally run the container
+
+**Option B: Manual Docker commands**
+
 ```bash
 # Build image
-docker build -t sn121-validator .
+docker build -t sundae-bar-validator:latest .
 
 # Run with environment variables
-docker run --rm --env-file .env sn121-validator
+docker run --rm --env-file .env -p 8080:8080 sundae-bar-validator:latest
 ```
 
 Or with inline environment variables:
@@ -60,11 +71,13 @@ Or with inline environment variables:
 docker run --rm \
   -e MNEMONIC="your mnemonic here" \
   -e API_URL="http://host.docker.internal:3002/api/v2/validators" \
+  -e LETTA_BASE_URL="http://host.docker.internal:8283" \
   -e DISPLAY_NAME="My Validator" \
   -e OPENAI_API_KEY="your-openai-key" \
   -e ANTHROPIC_API_KEY="your-anthropic-key" \
+  -e GITHUB_TOKEN="ghp_your_token" \
+  -e MAX_STEPS="10" \
   -p 8080:8080 \
-  -p 8283:8283 \
   sundae-bar-validator:latest
 ```
 
@@ -102,6 +115,20 @@ docker run --rm \
 | `RETRY_DELAY` | No | `1000` | Retry delay in milliseconds |
 | `LOG_LEVEL` | No | `info` | Log level (trace, debug, info, warn, error, fatal) |
 | `WORK_DIR` | No | `/tmp/validator-work` | Working directory for task files |
+| `LETTA_BASE_URL` | Yes | - | Letta server URL (e.g., `http://localhost:8283`) |
+| `GITHUB_TOKEN` | No | - | GitHub personal access token for authenticated API requests (increases rate limits) |
+| `MAX_STEPS` | No | `10` | Maximum number of agent steps/tool calls per evaluation sample |
+| `BITTENSOR_WEIGHTS_INTERVAL_MINUTES` | No | `30` | Interval for fetching and submitting Bittensor weights (minutes) |
+| `BITTENSOR_WEIGHTS_DISABLED` | No | `false` | Set to `true` to disable on-chain weight submission (still fetches and logs) |
+| `BITTENSOR_VALIDATOR_SECRET` | No* | - | Coldkey mnemonic for signing Bittensor weight transactions |
+| `SERVER_PORT` | No | `8080` | HTTP server port for health checks |
+| `MAX_CONCURRENT_TASKS` | No | `1` | Maximum number of tasks to process concurrently |
+| `KEEP_TASK_FILES` | No | - | Set to `1` to keep task files after processing (for debugging) |
+| `LETTA_EMBEDDING_WAIT_MINUTES` | No | `30` | Maximum time to wait for file embeddings to complete |
+| `LETTA_EVALS_PYTHON` | No | `python3` | Python command to use for running letta-evals |
+| `LETTA_EVALS_MODULE` | No | `letta_evals.cli` | Python module to use for letta-evals CLI |
+| `LETTA_URL` | No | - | Alternative to `LETTA_BASE_URL` (deprecated, use `LETTA_BASE_URL`) |
+| `TOGETHERAI_API_KEY` | No | - | Alternative to `TOGETHER_API_KEY` for Together AI |
 
 ### Model Provider API Keys
 
@@ -129,9 +156,6 @@ export ANTHROPIC_API_KEY="sk-ant-..."
 letta server
 ```
 
-**For Letta Cloud:**
-API keys are managed in your Letta Cloud account settings. You configure which models/providers you want to use in the Letta Cloud dashboard.
-
 #### 2. **Grading/Evaluation** (Model Judges)
 
 The graders in the suite.yaml use API keys passed to `letta-evals` by the validator. These are the API keys you set in the validator's environment:
@@ -143,6 +167,7 @@ The graders in the suite.yaml use API keys passed to `letta-evals` by the valida
 | `GOOGLE_API_KEY` | No* | Google API key (for Gemini grader models) |
 | `OPENROUTER_API_KEY` | No* | OpenRouter API key (for multi-provider access) |
 | `TOGETHER_API_KEY` | No* | Together AI API key (alternative: `TOGETHERAI_API_KEY`) |
+| `GITHUB_TOKEN` | No | GitHub personal access token (passed to letta-evals, useful if evaluations need GitHub access) |
 
 \* At least one model provider API key is required for evaluations to run (for the graders).
 
@@ -166,7 +191,7 @@ When `provider: openai` is specified, `letta-evals` will use `OPENAI_API_KEY`. S
 - `provider: together` → uses `TOGETHER_API_KEY` or `TOGETHERAI_API_KEY`
 
 **Summary:**
-- **Agent models**: Configured in the `.af` file, API keys needed on the **Letta server** (local or cloud)
+- **Agent models**: Configured in the `.af` file, API keys needed on the **Letta server** (self-hosted)
 - **Grader models**: Configured in `suite.yaml` with `provider` field, API keys needed in the **validator** environment
 
 ### Letta Configuration
@@ -184,11 +209,15 @@ Run a Letta server yourself (for example using the `../letta-server` Docker Comp
 **Example:**
 ```bash
 docker run --rm \
-  -e MNEMONIC="..." \
-  -e API_URL="http://localhost:3002/api/v2/validators" \
+  --env-file .env \
   -e LETTA_BASE_URL="http://host.docker.internal:8283" \
-  -e OPENAI_API_KEY="sk-..." \
+  -p 8080:8080 \
   sundae-bar-validator:latest
+```
+
+Or use the deployment script:
+```bash
+./scripts/deploy.sh
 ```
 
 
@@ -199,34 +228,61 @@ docker run --rm \
    - Creates key pair from mnemonic
    - Registers with coordinator using hotkey + signature
    - Starts heartbeat loop
+   - Starts weights submission loop (if configured)
 
-2. **Polling**:
+2. **Task Processing**:
    - Polls coordinator for tasks (`GET /api/v2/validators/tasks?hotkey=...&status=queued`)
    - Claims tasks and processes them
+   - Uploads files to Letta server
    - Runs `letta-evals` with appropriate API keys
-   - Submits results back to coordinator
+   - Uploads raw evaluation output to coordinator
+   - Submits compact results back to coordinator
    - Continues polling at configured interval
 
 3. **Heartbeat**:
    - Sends periodic heartbeats to maintain online status
    - Allows coordinator to track validator availability
 
-4. **Error Handling**:
+4. **Bittensor Weights**:
+   - Periodically fetches weights from coordinator based on leader performance
+   - Validates validator status on subnet 121
+   - Submits weights on-chain via `setWeights` extrinsic
+   - Can be disabled with `BITTENSOR_WEIGHTS_DISABLED=true`
+
+5. **Error Handling**:
    - Automatic retries with exponential backoff
    - Network errors and 5xx responses are retried
    - Non-retryable errors (4xx) fail immediately
    - Graceful shutdown on errors
 
-## Letta Server Setup
+### Bittensor Weights Configuration
 
-There are two supported ways to provide a Letta server:
+The validator can submit weights to the Bittensor network based on leader performance:
 
-1. **Self-hosted (recommended for validators)**  
-   - Use the `letta-server/` directory in this repo.  
-   - Copy `env.letta.example` → `.env.letta`, fill in your model API keys, then run `docker compose up -d`.  
-   - Set `LETTA_BASE_URL` (e.g., `http://host.docker.internal:8283` or `http://your-server:8283`) when launching the validator container.
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `BITTENSOR_WEIGHTS_INTERVAL_MINUTES` | No | Interval for fetching weights (default: 30 minutes) |
+| `BITTENSOR_WEIGHTS_DISABLED` | No | Set to `true` to disable on-chain submission (still fetches and logs) |
+| `BITTENSOR_VALIDATOR_SECRET` | No* | Coldkey mnemonic for signing weight transactions |
 
-Graders still need their own API keys in the validator environment (OpenAI, Anthropic, etc.) so `letta-evals` can call the requested judge models.
+\* Required only if `BITTENSOR_WEIGHTS_DISABLED` is not set to `true`.
+
+**How it works:**
+- Fetches weights from coordinator API based on leader minutes in the time window
+- Validates that the validator account is registered on subnet 121
+- Converts floating-point weights (0.0-1.0) to u16 integers (0-65535)
+- Submits weights on-chain via Polkadot API
+- Logs detailed information about the submission process
+
+**Example:**
+```bash
+docker run --rm \
+  --env-file .env \
+  -e BITTENSOR_VALIDATOR_SECRET="your coldkey mnemonic here" \
+  -e BITTENSOR_WEIGHTS_INTERVAL_MINUTES=30 \
+  -p 8080:8080 \
+  sundae-bar-validator:latest
+```
 
 ## Security
 
@@ -266,14 +322,15 @@ The validator uses structured logging with Pino. Log levels:
 
 Set log level via `LOG_LEVEL` environment variable.
 
-## Next Steps
+## Health Endpoints
 
-Currently, the validator only logs tasks. Future enhancements:
+The validator exposes HTTP endpoints for monitoring:
 
-1. **Task Claiming**: Claim tasks before processing
-2. **File Handling**: Decode base64 files from task payload
-3. **Evaluation**: Run letta-evals on tasks
-4. **Result Submission**: Submit evaluation results back to coordinator
+- `GET /health` - Basic health check
+- `GET /status` - Detailed validator status
+- `GET /metrics` - Memory and uptime metrics
+
+These endpoints are available on port 8080 by default (configurable via `SERVER_PORT`).
 
 ## Troubleshooting
 
@@ -294,6 +351,32 @@ Currently, the validator only logs tasks. Future enhancements:
 ### "Signature verification failed"
 - Check that mnemonic matches the registered hotkey
 - Verify coordinator is not in local bypass mode
+
+### "Failed to submit bittensor weights"
+- Verify `BITTENSOR_VALIDATOR_SECRET` is set (coldkey mnemonic)
+- Check that the account is registered as a validator on subnet 121
+- Ensure network connectivity to Bittensor entrypoint
+- Check logs for detailed error information
+
+### "Letta API error" or "502 Bad Gateway"
+- Verify `LETTA_BASE_URL` is correct and accessible
+- Check that Letta server is running
+- Ensure network connectivity between validator and Letta server
+
+## Architecture
+
+```
+┌─────────────┐      ┌──────────────┐      ┌─────────────┐
+│ Coordinator │◄─────┤   Validator   │──────►│ Letta Server│
+│    API      │      │              │      │             │
+└─────────────┘      └──────┬───────┘      └─────────────┘
+                            │
+                            ▼
+                    ┌──────────────┐
+                    │  Bittensor   │
+                    │   Network    │
+                    └──────────────┘
+```
 
 ## License
 

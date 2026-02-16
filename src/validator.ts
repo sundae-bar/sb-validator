@@ -355,7 +355,11 @@ export class Validator {
 
         if (response.tasks && response.tasks.length > 0) {
           logger.info(
-            { count: response.tasks.length },
+            { 
+              count: response.tasks.length,
+              taskIds: response.tasks.map(t => t.id),
+              hotkey: this.hotkey
+            },
             'Found tasks, processing...'
           );
 

@@ -1,5 +1,3 @@
 # Python dependencies for the validator container
-# letta-evals 0.6.1 may need a specific letta-client version
-# Try installing letta-client first, then letta-evals
-letta-client>1.0.0
+letta-client>1.7.0
 letta-evals==0.9.0

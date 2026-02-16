@@ -43,8 +43,7 @@ export async function createKeyPair(mnemonic: string): Promise<KeyringPair> {
     if (errorMessage.includes('Invalid bip39 mnemonic')) {
       throw new Error(
         `Invalid mnemonic: ${errorMessage}\n` +
-        `Please generate a valid mnemonic using: cd ../sn121 && npm run generate-keys\n` +
-        `Or use a valid 12-word BIP39 mnemonic phrase.`
+        `Please use your valid Bittensor validator hotkey mnemonic (12-word BIP39 phrase).`
       );
     }
     

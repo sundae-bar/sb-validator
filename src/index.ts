@@ -18,17 +18,15 @@ function loadConfig(): ValidatorConfig {
   if (!mnemonic) {
     throw new Error(
       'MNEMONIC environment variable is required.\n' +
-      'Generate one with: cd ../sn121 && npm run generate-keys\n' +
-      'Then set it in your .env file or environment.'
+      'Set your Bittensor validator hotkey mnemonic in your .env file or environment.'
     );
   }
 
-  // Check if it's the placeholder from .env.example
+  // Check if it's the placeholder from env.example
   if (mnemonic.includes('word1 word2 word3')) {
     throw new Error(
       'Please replace the placeholder mnemonic in your .env file.\n' +
-      'Generate a valid mnemonic with: cd ../sn121 && npm run generate-keys\n' +
-      'Then update MNEMONIC in your .env file.'
+      'Set your Bittensor validator hotkey mnemonic (the same one you use for subnet 121).'
     );
   }
 

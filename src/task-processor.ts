@@ -19,7 +19,7 @@ import * as yaml from 'js-yaml';
 import logger from './logger';
 import { ApiClient } from './api-client';
 import type { Task } from './types';
-import { LettaClient } from './letta-client';
+import { LettaClient, type FileMetadata } from './letta-client';
 
 const execAsync = promisify(exec);
 
@@ -573,25 +573,6 @@ export class TaskProcessor {
    * @param taskPayload - Task payload containing files and config
    * @param workDir - Task-specific work directory (must be unique per task)
    */
-  /**
-   * Recursively collect all file paths under a directory.
-   */
-  private async getAllFilesInDirectory(dir: string): Promise<string[]> {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    const files: string[] = [];
-
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        const subFiles = await this.getAllFilesInDirectory(fullPath);
-        files.push(...subFiles);
-      } else if (entry.isFile()) {
-        files.push(fullPath);
-      }
-    }
-
-    return files;
-  }
 
   /**
    * Download files from GitHub repository
@@ -615,12 +596,20 @@ export class TaskProcessor {
     logger.info({ repoUrl, folderPath, githubApiUrl }, 'Downloading files from GitHub');
 
     try {
+      // Prepare headers with optional GitHub token for authentication
+      const headers: Record<string, string> = {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'SundaeBar-Validator'
+      };
+      
+      // Add GitHub token if available (authenticated requests get higher rate limits)
+      if (process.env.GITHUB_TOKEN) {
+        headers['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
+      }
+      
       // Use GitHub API to list files in the directory
       const response = await fetch(githubApiUrl, {
-        headers: {
-          'Accept': 'application/vnd.github.v3+json',
-          'User-Agent': 'SundaeBar-Validator'
-        }
+        headers
       });
 
       if (!response.ok) {
@@ -640,10 +629,17 @@ export class TaskProcessor {
           // Use raw.githubusercontent.com for direct file download
           const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${repoPath}/${item.name}`;
           
+          const fileHeaders: Record<string, string> = {
+            'User-Agent': 'SundaeBar-Validator'
+          };
+          
+          // Add GitHub token if available
+          if (process.env.GITHUB_TOKEN) {
+            fileHeaders['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
+          }
+          
           const fileResponse = await fetch(rawUrl, {
-            headers: {
-              'User-Agent': 'SundaeBar-Validator'
-            }
+            headers: fileHeaders
           });
           
           if (!fileResponse.ok) {
@@ -655,7 +651,7 @@ export class TaskProcessor {
           const filePath = path.join(outputDir, item.name);
           await fs.writeFile(filePath, fileContent, 'utf-8');
           downloadedFiles.push(filePath);
-          logger.info({ fileName: item.name, filePath }, 'Downloaded file from GitHub');
+          logger.debug({ fileName: item.name, filePath }, 'Downloaded file from GitHub');
         } else if (item.type === 'dir') {
           // Recursively download subdirectory
           const subDir = path.join(outputDir, item.name);
@@ -815,7 +811,7 @@ export class TaskProcessor {
       agent.folder_ids.push(folderId);
       updated = true;
     }
-    logger.info(
+    logger.debug(
       { folderId, folderIdsCount: agent.folder_ids.length, sourceIdsCount: agent.source_ids?.length || 0 },
       'Updated folder_ids array for agent (source_ids kept as placeholders)'
     );
@@ -851,31 +847,31 @@ export class TaskProcessor {
       id: f.id,
     }));
 
-    // files_agents[]: one entry per canonical file, closed by default
-    agent.files_agents = canonicalFiles.map((f, index) => ({
-      agent_id: agentId,
-      file_id: f.id,
-      source_id: originalSourceId,
-      file_name: f.file_name,
-      is_open: false,
-      visible_content: '',
-      last_accessed_at: nowIso,
-      start_line: null,
-      end_line: null,
-      id: `file_agent-${index}`,
-    }));
+    // files_agents[]: set to empty array - files are accessed via folder_ids instead
+    agent.files_agents = [];
     updated = true;
 
-    // 3. Don't update sources array - sources.id must remain as placeholder (integer suffix required)
-    // The folder_ids array tells Letta which folder to use, and Letta will resolve it.
-    logger.debug(
-      { folderId },
-      'Keeping source_ids, files.source_id, and sources.id as placeholders (folder_ids used instead)'
-    );
+    // 3. Update all sources array names to filesystem_data
+    // This prevents letta-evals from creating folders with arbitrary names when importing the agent file
+    // We keep the source entries (with their IDs) because files array references them
+    // But we change all names to filesystem_data so they match our folder name
+    if (agentData.sources && Array.isArray(agentData.sources)) {
+      for (const source of agentData.sources) {
+        if (source.name && source.name !== 'filesystem_data') {
+          const oldName = source.name;
+          source.name = 'filesystem_data';
+          updated = true;
+          logger.debug(
+            { sourceId: source.id, oldName, newName: 'filesystem_data' },
+            'Updated source name to filesystem_data'
+          );
+        }
+      }
+    }
     
     if (updated) {
       const updatedContent = JSON.stringify(agentData, null, 2);
-      logger.info(
+      logger.debug(
         { 
           folderId, 
           taskId,
@@ -972,6 +968,97 @@ export class TaskProcessor {
     
     if (this.lettaClient) {
       try {
+        // Log all agents in Letta for debugging, then delete them all
+        try {
+          const allAgents = await this.lettaClient.listAgents();
+          logger.debug(
+            {
+              totalAgents: allAgents.length,
+              agents: allAgents.map(a => ({
+                id: a.id,
+                name: a.name,
+                created_at: a.created_at,
+              })),
+            },
+            'All agents in Letta'
+          );
+          
+          // Delete all agents to clean up from previous runs
+          if (allAgents.length > 0) {
+            logger.debug(
+              { agentCount: allAgents.length },
+              'Deleting all agents to clean up from previous runs'
+            );
+            
+            let deletedCount = 0;
+            let failedCount = 0;
+            for (const agent of allAgents) {
+              try {
+                await this.lettaClient.deleteAgent(agent.id);
+                deletedCount++;
+              } catch (error) {
+                failedCount++;
+                logger.warn(
+                  { 
+                    error: error instanceof Error ? error.message : String(error),
+                    agentId: agent.id,
+                    agentName: agent.name
+                  },
+                  'Failed to delete agent (non-fatal)'
+                );
+              }
+            }
+            
+            logger.debug(
+              { 
+                total: allAgents.length,
+                deleted: deletedCount,
+                failed: failedCount
+              },
+              'Completed deletion of all agents'
+            );
+          }
+        } catch (error) {
+          logger.warn(
+            { error: error instanceof Error ? error.message : String(error) },
+            'Failed to list/delete all agents (non-fatal)'
+          );
+        }
+
+        // Log all folders in Letta for debugging
+        try {
+          const allFolders = await this.lettaClient.listFolders();
+          logger.debug(
+            {
+              totalFolders: allFolders.length,
+              folders: allFolders.map(f => ({
+                id: f.id,
+                name: f.name,
+                description: f.description,
+                created_at: f.created_at,
+              })),
+            },
+            'All folders in Letta'
+          );
+        } catch (error) {
+          logger.warn(
+            { error: error instanceof Error ? error.message : String(error) },
+            'Failed to list all folders (non-fatal)'
+          );
+        }
+
+        // Clean up orphaned folders with hash suffixes (filesystem_data_*, company_policy_data_*)
+        // Skip if we can't list folders (API might be having issues)
+        try {
+          await this.lettaClient.cleanupOrphanedFolders();
+        } catch (error) {
+          // If cleanup fails due to API issues, log but continue - we'll try again next time
+          logger.warn(
+            { error: error instanceof Error ? error.message : String(error) },
+            'Failed to cleanup orphaned folders (non-fatal, will retry on next task)'
+          );
+        }
+
         // Find or create folder in Letta (reuse same folder for all agents since files are the same)
         // Cache folder ID to avoid lookup every time
         if (this.filesystemDataFolderId) {
@@ -981,10 +1068,10 @@ export class TaskProcessor {
             'Using cached filesystem data folder ID'
           );
         } else {
-          logger.info({ taskId: taskPayload.task_id }, 'Finding or creating filesystem data folder');
+          logger.debug({ taskId: taskPayload.task_id }, 'Finding or creating filesystem data folder');
           const folder = await this.lettaClient.findOrCreateFolder(
             this.FILESYSTEM_DATA_FOLDER_NAME,
-            'Filesystem data from GitHub repository and local validator/files directory'
+            'Filesystem data from GitHub repository'
           );
           
           if (!folder || !folder.id) {
@@ -993,7 +1080,31 @@ export class TaskProcessor {
           
           folderId = folder.id;
           this.filesystemDataFolderId = folderId; // Cache it
-          logger.info({ folderId, folderName: folder.name }, 'Folder ID obtained for filesystem data');
+          logger.debug({ folderId, folderName: folder.name }, 'Folder ID obtained for filesystem data');
+          
+          // Log files in folder before evaluation starts
+          try {
+            const folderFiles = await this.lettaClient.listFilesInFolder(folderId);
+            logger.info(
+              {
+                taskId: taskPayload.task_id,
+                folderId,
+                fileCount: folderFiles.length,
+                files: folderFiles.map(f => ({
+                  id: f.id,
+                  name: f.name || f.file_name,
+                  size: f.size,
+                  status: f.processing_status
+                }))
+              },
+              'Files in folder before evaluation'
+            );
+          } catch (error) {
+            logger.warn(
+              { error: error instanceof Error ? error.message : String(error), taskId: taskPayload.task_id, folderId },
+              'Failed to list files in folder'
+            );
+          }
         }
         
         // Download files from GitHub
@@ -1004,6 +1115,34 @@ export class TaskProcessor {
           filesDir
         );
 
+        // List existing files once (more efficient than checking per-file)
+        const existingFiles = await this.lettaClient.listFilesInFolder(folderId);
+        const existingFilesMap = new Map<string, FileMetadata>();
+        for (const file of existingFiles) {
+          // Files may have file_name, original_file_name, or name - use the first available
+          const fileName = file.file_name || file.original_file_name || file.name;
+          if (fileName) {
+            // Use just the basename for matching (in case file_name has path)
+            const baseName = path.basename(fileName);
+            existingFilesMap.set(baseName, file);
+          }
+        }
+        logger.debug(
+          {
+            folderId,
+            existingFileCount: existingFiles.length,
+            existingFiles: existingFiles.map(f => ({
+              name: f.name,
+              id: f.id,
+              size: f.size,
+              file_name: f.file_name,
+              original_file_name: f.original_file_name,
+            })),
+            fileNames: Array.from(existingFilesMap.keys()),
+          },
+          'Loaded existing files from folder'
+        );
+
         // Upload files from GitHub to Letta folder, only if they're new or changed
         let githubUploadedCount = 0;
         let githubSkippedCount = 0;
@@ -1011,19 +1150,63 @@ export class TaskProcessor {
         
         for (const filePath of downloadedFiles) {
           try {
-            const result = await this.lettaClient.uploadFileIfChanged(folderId, filePath);
-            if (result.uploaded) {
-              githubUploadedCount++;
-              filesWereUploaded = true; // Track that we uploaded something
-              logger.info(
-                { source: 'github', fileName: path.basename(filePath), folderId, reason: result.reason },
-                'File uploaded to Letta folder'
-              );
+            const fileName = path.basename(filePath);
+            const existingFile = existingFilesMap.get(fileName);
+            
+            if (existingFile) {
+              // File exists - check if size changed
+              const localSize = await this.lettaClient.getFileSize(filePath);
+              
+              // If we don't have size info for existing file, skip upload (assume unchanged)
+              if (!existingFile.size) {
+                githubSkippedCount++;
+                logger.debug(
+                  { source: 'github', fileName, folderId, localSize, reason: 'No size info for existing file, assuming unchanged' },
+                  'File skipped (exists but no size info)'
+                );
+                continue;
+              }
+              
+              // Compare sizes - only replace if different
+              if (existingFile.size === localSize) {
+                githubSkippedCount++;
+                logger.debug(
+                  { source: 'github', fileName, folderId, size: localSize },
+                  'File skipped (already exists and unchanged)'
+                );
+                continue;
+              } else {
+                // Size changed - replace it
+                logger.info(
+                  { source: 'github', fileName, folderId, existingSize: existingFile.size, newSize: localSize },
+                  'File exists but size changed, replacing'
+                );
+                await this.lettaClient.uploadFileToFolder(folderId, filePath, fileName, 'replace');
+                githubUploadedCount++;
+                filesWereUploaded = true;
+                // Update the map so subsequent checks see the new file
+                existingFilesMap.set(fileName, { ...existingFile, size: localSize });
+                logger.info(
+                  { source: 'github', fileName, folderId, reason: 'File replaced due to size change' },
+                  'File uploaded to Letta folder'
+                );
+              }
             } else {
-              githubSkippedCount++;
-              logger.debug(
-                { source: 'github', fileName: path.basename(filePath), folderId, reason: result.reason },
-                'File skipped (already exists and unchanged)'
+              // File doesn't exist - upload it
+              logger.info(
+                { source: 'github', fileName, folderId },
+                'File does not exist, uploading'
+              );
+              const fileMetadata = await this.lettaClient.uploadFileToFolder(folderId, filePath, fileName, 'replace');
+              githubUploadedCount++;
+              filesWereUploaded = true;
+              // Add to map so subsequent checks see it
+              if (fileMetadata) {
+                existingFilesMap.set(fileName, fileMetadata);
+              }
+              logger.info(
+                { source: 'github', fileName, folderId, reason: 'New file uploaded' },
+                'File uploaded to Letta folder'
               );
             }
           } catch (error) {
@@ -1036,81 +1219,7 @@ export class TaskProcessor {
           }
         }
 
-        // Also upload any local files from the validator/files directory into the same folder
-        let localUploadedCount = 0;
-        let localSkippedCount = 0;
-        let localErrorCount = 0;
-        let localFilesCount = 0;
-
-        try {
-          const localFilesRoot = path.resolve(process.cwd(), 'files');
-          const localExists = await fs
-            .access(localFilesRoot)
-            .then(() => true)
-            .catch(() => false);
-
-          if (localExists) {
-            const localFiles = await this.getAllFilesInDirectory(localFilesRoot);
-            localFilesCount = localFiles.length;
-
-            for (const filePath of localFiles) {
-              try {
-                const result = await this.lettaClient.uploadFileIfChanged(folderId, filePath);
-                if (result.uploaded) {
-                  localUploadedCount++;
-                  filesWereUploaded = true; // Track that we uploaded something
-                  logger.info(
-                    {
-                      source: 'local',
-                      fileName: path.relative(localFilesRoot, filePath),
-                      folderId,
-                      reason: result.reason,
-                    },
-                    'File uploaded to Letta folder'
-                  );
-                } else {
-                  localSkippedCount++;
-                  logger.debug(
-                    {
-                      source: 'local',
-                      fileName: path.relative(localFilesRoot, filePath),
-                      folderId,
-                      reason: result.reason,
-                    },
-                    'File skipped (already exists and unchanged)'
-                  );
-                }
-              } catch (error) {
-                localErrorCount++;
-                logger.error(
-                  {
-                    source: 'local',
-                    error: error instanceof Error ? error.message : String(error),
-                    filePath,
-                    folderId,
-                  },
-                  'Failed to upload local file to Letta folder'
-                );
-              }
-            }
-          } else {
-            logger.info(
-              { folderId, localFilesRoot },
-              'Local validator/files directory not found, skipping local file upload'
-            );
-          }
-        } catch (error) {
-          logger.error(
-            {
-              source: 'local',
-              error: error instanceof Error ? error.message : String(error),
-              folderId,
-            },
-            'Error while processing local validator/files directory'
-          );
-        }
-
-        logger.info(
+        logger.debug(
           {
             folderId,
             github: {
@@ -1119,20 +1228,14 @@ export class TaskProcessor {
               skipped: githubSkippedCount,
               errors: githubErrorCount,
             },
-            local: {
-              total: localFilesCount,
-              uploaded: localUploadedCount,
-              skipped: localSkippedCount,
-              errors: localErrorCount,
-            },
           },
-          'Filesystem data files processed (GitHub + local)'
+          'Filesystem data files processed from GitHub'
         );
 
         // Log all files currently in the Letta folder (helps debug file names / paths)
         try {
           const filesInFolder = await this.lettaClient.listFilesInFolder(folderId);
-          logger.info(
+          logger.debug(
             {
               folderId,
               filesCount: filesInFolder.length,
@@ -1159,15 +1262,13 @@ export class TaskProcessor {
           );
         }
 
-        logger.info(
+        logger.debug(
           {
             taskId: taskPayload.task_id,
             folderId,
             filesWereUploaded,
             githubUploaded: githubUploadedCount,
             githubSkipped: githubSkippedCount,
-            localUploaded: localUploadedCount,
-            localSkipped: localSkippedCount
           },
           filesWereUploaded 
             ? 'Files were uploaded/changed - will wait for embeddings'
@@ -1352,7 +1453,7 @@ export class TaskProcessor {
     let agentFileName = 'agent.af';
     
     if (taskPayload.agent_file_path) {
-      logger.info(
+      logger.debug(
         { taskId: taskPayload.task_id, url: taskPayload.agent_file_path },
         'PrepareFiles: downloading agent file'
       );
@@ -1377,7 +1478,7 @@ export class TaskProcessor {
                                   agent.sources?.some((src: any) => src.id === folderId);
               
               if (hasFolderId) {
-                logger.info(
+                logger.debug(
                   {
                     taskId: taskPayload.task_id,
                     folderId,
@@ -1427,7 +1528,7 @@ export class TaskProcessor {
       const previewLength = 2000; // Prevent logging extremely large files
       const agentPreview = agentContent.substring(0, previewLength);
       
-      logger.info({
+      logger.debug({
         taskId: taskPayload.task_id,
         agentFilePath,
         previewLength: agentContent.length,
@@ -1442,7 +1543,7 @@ export class TaskProcessor {
     const dataset = taskPayload.dataset_file_path;
 
     if (dataset) {
-      logger.info(
+      logger.debug(
         { taskId: taskPayload.task_id, url: dataset },
         'PrepareFiles: downloading dataset'
       );
@@ -1458,14 +1559,14 @@ export class TaskProcessor {
         // Convert CSV to JSONL if needed
         let finalContent = datasetContent;
         if (this.isCsvContent(datasetContent)) {
-          logger.info({ taskId: taskPayload.task_id, datasetPath }, 'PrepareFiles: converting CSV to JSONL');
+          logger.debug({ taskId: taskPayload.task_id, datasetPath }, 'PrepareFiles: converting CSV to JSONL');
           finalContent = this.csvToJsonl(datasetContent);
         }
         
         await fs.writeFile(datasetPath, finalContent, 'utf-8');
         try {
           await this.validateDataset(datasetPath);
-          logger.info({ taskId: taskPayload.task_id, datasetPath }, 'PrepareFiles: downloaded and validated dataset file');
+          logger.debug({ taskId: taskPayload.task_id, datasetPath }, 'PrepareFiles: downloaded and validated dataset file');
         } catch (error) {
           // Re-throw with more context
           const errorMessage = error instanceof Error ? error.message : String(error);
@@ -1490,13 +1591,13 @@ export class TaskProcessor {
       throw new Error(`Rubric file path is required but not provided for task ${taskPayload.task_id}`);
     }
     
-    logger.info({ taskId: taskPayload.task_id, url: taskPayload.rubric_file_path }, 'PrepareFiles: downloading rubric');
+    logger.debug({ taskId: taskPayload.task_id, url: taskPayload.rubric_file_path }, 'PrepareFiles: downloading rubric');
     const rubricContent = await this.downloadFileWithBackup(
       taskPayload.rubric_file_path,
       (taskPayload as any).rubric_backup_file_path
     );
     await fs.writeFile(rubricPath, rubricContent, 'utf-8');
-    logger.info({ taskId: taskPayload.task_id, rubricPath }, 'PrepareFiles: downloaded rubric file');
+    logger.debug({ taskId: taskPayload.task_id, rubricPath }, 'PrepareFiles: downloaded rubric file');
 
     // Override base_url to use validator's configured Letta server
     let targetBaseUrl: string | undefined;
@@ -1516,7 +1617,7 @@ export class TaskProcessor {
     }
 
     // Use provided suite.yaml file, but override base_url and ensure dataset path is correct
-    logger.info(
+    logger.debug(
       { taskId: taskPayload.task_id, url: taskPayload.suite_file_path },
       'PrepareFiles: downloading suite.yaml'
     );
@@ -1680,7 +1781,7 @@ export class TaskProcessor {
       );
     }
     
-    logger.info({
+    logger.debug({
       taskId: taskPayload.task_id,
       suitePath,
       targetBaseUrl,
@@ -1719,6 +1820,39 @@ export class TaskProcessor {
     await fs.mkdir(outputDir, { recursive: true });
 
     const startTime = Date.now();
+
+    // Track agents and folders before evaluation to clean them up afterward
+    let agentsBeforeEvaluation: Set<string> = new Set();
+    let foldersBeforeEvaluation: Set<string> = new Set();
+    if (this.lettaClient) {
+      try {
+        const agentsBefore = await this.lettaClient.listAgents();
+        agentsBeforeEvaluation = new Set(agentsBefore.map(a => a.id));
+        logger.debug(
+          { agentCount: agentsBeforeEvaluation.size },
+          'Tracked agents before evaluation for cleanup'
+        );
+      } catch (error) {
+        logger.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Failed to list agents before evaluation (cleanup may be incomplete)'
+        );
+      }
+      
+      try {
+        const foldersBefore = await this.lettaClient.listFolders();
+        foldersBeforeEvaluation = new Set(foldersBefore.map(f => f.id));
+        logger.debug(
+          { folderCount: foldersBeforeEvaluation.size },
+          'Tracked folders before evaluation for cleanup'
+        );
+      } catch (error) {
+        logger.warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          'Failed to list folders before evaluation (cleanup may be incomplete)'
+        );
+      }
+    }
 
     // Run letta-evals via python module to avoid relying on shell scripts
     const pythonCmd = process.env.LETTA_EVALS_PYTHON || 'python3';
@@ -1762,7 +1896,7 @@ export class TaskProcessor {
     
     // First, validate the suite configuration
     const validateCmd = `${pythonCmd} -m ${cliModule} validate "${suiteFile}"`;
-    logger.info({ validateCmd, cwd: suiteDir }, 'Validating suite.yaml');
+    logger.debug({ validateCmd, cwd: suiteDir }, 'Validating suite.yaml');
     
     try {
       const { stdout: validateStdout, stderr: validateStderr } = await execAsync(validateCmd, {
@@ -1777,7 +1911,7 @@ export class TaskProcessor {
       if (validateStderr) {
         logger.warn({ stderr: validateStderr }, 'Suite validation stderr');
       }
-      logger.info('Suite validation passed');
+      logger.debug('Suite validation passed');
     } catch (error: any) {
       const validateStdout = error?.stdout || '';
       const validateStderr = error?.stderr || '';
@@ -1796,9 +1930,9 @@ export class TaskProcessor {
       throw new Error(`Suite validation failed: ${validateMessage}${validateStderr ? '\n' + validateStderr : ''}`);
     }
 
-    // Now run the evaluation with custom graders using wrapper script
+    // Now run the evaluation using wrapper script
     const cmd = `${pythonCmd} /app/python/run_with_graders.py run "${suiteFile}" --output "${outputDir}"`;
-    logger.info({ cmd, cwd: suiteDir, outputDir }, 'Running letta-evals with custom graders');
+    logger.info({ cmd, cwd: suiteDir, outputDir }, 'Running letta-evals');
 
     try {
       // Prepare environment variables for letta-evals
@@ -1827,6 +1961,14 @@ export class TaskProcessor {
       }
       if (process.env.TOGETHERAI_API_KEY) {
         env.TOGETHERAI_API_KEY = process.env.TOGETHERAI_API_KEY;
+      }
+      // GitHub token for authenticated API requests (higher rate limits)
+      if (process.env.GITHUB_TOKEN) {
+        env.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      // Max steps for agent tool calls (limits number of steps per evaluation)
+      if (process.env.MAX_STEPS) {
+        env.MAX_STEPS = process.env.MAX_STEPS;
       }
       // Letta - only support hosted instances
       if (process.env.LETTA_BASE_URL) {
@@ -1902,6 +2044,128 @@ export class TaskProcessor {
       }
 
       const duration = (Date.now() - startTime) / 1000;
+
+      // Clean up agents created during evaluation
+      if (this.lettaClient && agentsBeforeEvaluation.size >= 0) {
+        try {
+          const agentsAfter = await this.lettaClient.listAgents();
+          const agentsAfterSet = new Set(agentsAfter.map(a => a.id));
+          
+          // Find agents that were created during evaluation
+          const agentsToDelete = Array.from(agentsAfterSet).filter(
+            agentId => !agentsBeforeEvaluation.has(agentId)
+          );
+
+          if (agentsToDelete.length > 0) {
+            logger.debug(
+              { agentCount: agentsToDelete.length, agentIds: agentsToDelete },
+              'Cleaning up agents created during evaluation'
+            );
+
+            let deletedCount = 0;
+            let failedCount = 0;
+            for (const agentId of agentsToDelete) {
+              try {
+                await this.lettaClient.deleteAgent(agentId);
+                deletedCount++;
+              } catch (error) {
+                failedCount++;
+                logger.warn(
+                  { 
+                    error: error instanceof Error ? error.message : String(error),
+                    agentId 
+                  },
+                  'Failed to delete agent created during evaluation (non-fatal)'
+                );
+              }
+            }
+
+            logger.debug(
+              { 
+                totalCreated: agentsToDelete.length,
+                deleted: deletedCount,
+                failed: failedCount
+              },
+              'Completed cleanup of agents created during evaluation'
+            );
+          } else {
+            logger.debug('No new agents created during evaluation');
+          }
+        } catch (error) {
+            logger.warn(
+            { error: error instanceof Error ? error.message : String(error) },
+            'Failed to clean up agents created during evaluation (non-fatal)'
+          );
+        }
+      }
+
+      // Clean up folders created during evaluation (e.g., company_policy_data_* folders)
+      if (this.lettaClient && foldersBeforeEvaluation.size >= 0) {
+        try {
+          const foldersAfter = await this.lettaClient.listFolders();
+          const foldersAfterSet = new Set(foldersAfter.map(f => f.id));
+          
+          // Find folders that were created during evaluation
+          const foldersToDelete = foldersAfter.filter(
+            folder => {
+              // Only delete folders that:
+              // 1. Were created during evaluation (not in before set)
+              // 2. Are company_policy_data_* folders (with hash suffixes)
+              // 3. Or exact match company_policy_data folder (if it was created during evaluation)
+              const wasCreatedDuringEvaluation = !foldersBeforeEvaluation.has(folder.id);
+              const isCompanyPolicyData = folder.name === 'company_policy_data' || folder.name.startsWith('company_policy_data_');
+              
+              return wasCreatedDuringEvaluation && isCompanyPolicyData;
+            }
+          );
+
+          if (foldersToDelete.length > 0) {
+            logger.debug(
+              { 
+                folderCount: foldersToDelete.length, 
+                folderNames: foldersToDelete.map(f => f.name),
+                folderIds: foldersToDelete.map(f => f.id)
+              },
+              'Cleaning up folders created during evaluation'
+            );
+
+            let deletedCount = 0;
+            let failedCount = 0;
+            for (const folder of foldersToDelete) {
+              try {
+                await this.lettaClient.deleteFolder(folder.id);
+                deletedCount++;
+              } catch (error) {
+                failedCount++;
+                logger.warn(
+                  { 
+                    error: error instanceof Error ? error.message : String(error),
+                    folderId: folder.id,
+                    folderName: folder.name
+                  },
+                  'Failed to delete folder created during evaluation (non-fatal)'
+                );
+              }
+            }
+
+            logger.debug(
+              { 
+                totalCreated: foldersToDelete.length,
+                deleted: deletedCount,
+                failed: failedCount
+              },
+              'Completed cleanup of folders created during evaluation'
+            );
+          } else {
+            logger.debug('No new company_policy_data folders created during evaluation');
+          }
+        } catch (error) {
+          logger.warn(
+            { error: error instanceof Error ? error.message : String(error) },
+            'Failed to clean up folders created during evaluation (non-fatal)'
+          );
+        }
+      }
 
       // Load results - validate that evaluation actually produced output
       const summaryPath = path.join(outputDir, 'summary.json');
