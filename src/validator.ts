@@ -205,7 +205,12 @@ export class Validator {
             return;
           }
 
-          const validatorSecret = (process.env.BITTENSOR_VALIDATOR_SECRET || '').trim();
+          // Support both VALIDATOR_MNEMONIC (new) and BITTENSOR_VALIDATOR_SECRET (legacy) for backwards compatibility
+          const validatorSecret = (
+            process.env.VALIDATOR_MNEMONIC || 
+            process.env.BITTENSOR_VALIDATOR_SECRET || 
+            ''
+          ).trim();
           logger.debug(
             {
               hasValidatorSecret: !!validatorSecret,
@@ -218,10 +223,10 @@ export class Validator {
           if (!validatorSecret) {
             logger.warn(
               {
-                envVar: 'BITTENSOR_VALIDATOR_SECRET',
+                envVar: 'VALIDATOR_MNEMONIC',
                 weightsCount: weights.weights.length,
               },
-              'BITTENSOR_VALIDATOR_SECRET is not set; skipping on-chain bittensor setWeights submission',
+              'VALIDATOR_MNEMONIC is not set; skipping on-chain bittensor setWeights submission',
             );
             return;
           }

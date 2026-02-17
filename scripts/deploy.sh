@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-set -euo pipefail
+# Fail on errors and failed pipes; allow unset vars so sourcing .env is tolerant
+set -eo pipefail
 
 # Sundae Bar Validator Deployment Script
 # This script helps deploy the validator Docker container
@@ -31,19 +32,28 @@ error() {
 # Check if .env file exists
 if [ ! -f "$ENV_FILE" ]; then
     error "Missing $ENV_FILE"
-    info "Create it from env.example:"
-    echo "  cp $VALIDATOR_DIR/env.example $ENV_FILE"
+    info "Create it from .env.example:"
+    echo "  cp $VALIDATOR_DIR/.env.example $ENV_FILE"
     echo "  # Then edit $ENV_FILE and set your values"
     exit 1
 fi
 
 # Check for required variables
-source "$ENV_FILE" 2>/dev/null || true
+# Source .env but don't crash if there are minor issues
+if ! source "$ENV_FILE"; then
+    error "Failed to load environment from $ENV_FILE"
+    echo "Please ensure it contains valid lines like: KEY=value"
+    exit 1
+fi
 
-if [ -z "${MNEMONIC:-}" ] || [ "$MNEMONIC" = "word1 word2 word3 ..." ]; then
-    error "MNEMONIC is not set or is still the placeholder"
+# Support both VALIDATOR_MNEMONIC (new) and MNEMONIC (legacy)
+VALIDATOR_MNEMONIC="${VALIDATOR_MNEMONIC:-${MNEMONIC:-}}"
+
+if [ -z "$VALIDATOR_MNEMONIC" ] || [ "$VALIDATOR_MNEMONIC" = "word1 word2 word3 ..." ]; then
+    error "VALIDATOR_MNEMONIC is not set or is still the placeholder"
     info "Use your existing Bittensor validator hotkey mnemonic (the same one you use for subnet 121)"
-    info "Then update MNEMONIC in $ENV_FILE"
+    info "Then update VALIDATOR_MNEMONIC in $ENV_FILE"
+    info "(Note: MNEMONIC is deprecated, use VALIDATOR_MNEMONIC instead)"
     exit 1
 fi
 
@@ -57,10 +67,10 @@ if [ -z "${LETTA_BASE_URL:-}" ]; then
     exit 1
 fi
 
-# Build Docker image
-info "Building Docker image: $IMAGE_NAME"
+# Build Docker image (no cache to ensure latest TypeScript changes are used)
+info "Building Docker image (no cache): $IMAGE_NAME"
 cd "$VALIDATOR_DIR"
-docker build -t "$IMAGE_NAME" .
+docker build --no-cache -t "$IMAGE_NAME" .
 
 if [ $? -ne 0 ]; then
     error "Docker build failed"

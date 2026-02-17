@@ -10,15 +10,25 @@ import logger from './logger';
 import { createServer, startServer } from './server';
 import type { ValidatorConfig } from './types';
 
+/**
+ * Remove surrounding quotes from a string (handles both single and double quotes)
+ */
+function dequote(value: string): string {
+  if (!value) return value;
+  return value.trim().replace(/^["']|["']$/g, '');
+}
+
 // Load configuration from environment variables
 function loadConfig(): ValidatorConfig {
-  const mnemonic = process.env.MNEMONIC;
-  const apiUrl = process.env.API_URL || 'http://localhost:3002';
+  // Support both VALIDATOR_MNEMONIC (new) and MNEMONIC (legacy) for backwards compatibility
+  const mnemonic = dequote(process.env.VALIDATOR_MNEMONIC || process.env.MNEMONIC || '');
+  const apiUrl = dequote(process.env.API_URL || 'http://localhost:3002');
 
   if (!mnemonic) {
     throw new Error(
-      'MNEMONIC environment variable is required.\n' +
-      'Set your Bittensor validator hotkey mnemonic in your .env file or environment.'
+      'VALIDATOR_MNEMONIC environment variable is required.\n' +
+      'Set your Bittensor validator hotkey mnemonic in your .env file or environment.\n' +
+      '(Note: MNEMONIC is deprecated, use VALIDATOR_MNEMONIC instead)'
     );
   }
 
