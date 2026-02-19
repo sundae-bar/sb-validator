@@ -1,6 +1,6 @@
-# Sundae Bar Validator
+# sundae_bar Validator
 
-Secure validator client for Sundae Bar SN121 subnet. This validator polls for evaluation tasks, processes them, and submits results back to the coordinator.
+Secure validator client for sundae_bar SN121 subnet. This validator polls for evaluation tasks, processes them, and submits results back to the coordinator.
 
 ## Features
 
