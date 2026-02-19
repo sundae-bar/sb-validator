@@ -13,6 +13,57 @@ Secure validator client for Sundae Bar SN121 subnet. This validator polls for ev
 - ✅ **Structured Logging**: Configurable log levels with structured output
 - ✅ **Graceful Shutdown**: Handles SIGTERM/SIGINT properly
 
+## System Requirements
+
+### vCPU
+- **Minimum**: 1 vCPU
+- **Recommended**: 2+ vCPUs for better concurrent task processing
+- The validator can process tasks sequentially or concurrently (configurable via `MAX_CONCURRENT_TASKS`)
+
+### Memory
+- **Minimum**: 2 GB RAM
+- **Recommended**: 4 GB RAM or more
+- Memory usage scales with:
+  - Number of concurrent tasks (`MAX_CONCURRENT_TASKS`)
+  - Task complexity (agent execution steps, file sizes)
+  - Python evaluation processes (`letta-evals`)
+
+### Storage
+- **Minimum**: 5 GB free disk space
+- **Recommended**: 10+ GB for:
+  - Docker images (~2-3 GB)
+  - Temporary task files (cleaned up after processing by default)
+  - Logs and working directory (`WORK_DIR`, defaults to `/tmp/validator-work`)
+- Storage requirements increase if `KEEP_TASK_FILES=1` is set (for debugging)
+
+### GPU
+- **Not required**: The validator runs entirely on CPU
+- No GPU dependencies or CUDA requirements
+- All model inference is handled via third-party API calls (OpenAI, Anthropic, etc.)
+
+### Third-Party API Requirements
+
+The validator requires API keys for model providers used by graders in the evaluation suite.
+
+**Required API Keys**:
+- `OPENAI_API_KEY` - **Required** - For OpenAI models (GPT-4, GPT-3.5, etc.)
+
+**Optional API Keys**:
+- `ANTHROPIC_API_KEY` - For Anthropic models (Claude)
+- `GOOGLE_API_KEY` - For Google models (Gemini)
+- `OPENROUTER_API_KEY` - For OpenRouter (multi-provider access)
+- `TOGETHER_API_KEY` or `TOGETHERAI_API_KEY` - For Together AI models
+- `CHUTES_API_KEY` - For Chutes provider (OpenAI-compatible API)
+- `GITHUB_TOKEN` - GitHub personal access token for authenticated API requests (increases rate limits, useful if evaluations need GitHub access)
+
+**Note**: The specific API keys needed depend on the graders configured in the challenge's `suite.yaml` file. The validator passes these keys to `letta-evals`, which selects the appropriate key based on the `provider` field in the suite configuration.
+
+**API Usage**:
+- API calls are made during task evaluation (not during agent execution)
+- Agent execution uses API keys configured on the Letta server (separate from validator API keys)
+- Rate limits depend on your API provider plan
+- Costs vary by provider and model used
+
 ## Quick Start
 
 There are two recommended ways to run the validator:
@@ -252,14 +303,13 @@ The graders in the suite.yaml use API keys passed to `letta-evals` by the valida
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `OPENAI_API_KEY` | No* | OpenAI API key (for GPT grader models) |
-| `ANTHROPIC_API_KEY` | No* | Anthropic API key (for Claude grader models) |
-| `GOOGLE_API_KEY` | No* | Google API key (for Gemini grader models) |
-| `OPENROUTER_API_KEY` | No* | OpenRouter API key (for multi-provider access) |
-| `TOGETHER_API_KEY` | No* | Together AI API key (alternative: `TOGETHERAI_API_KEY`) |
+| `OPENAI_API_KEY` | **Yes** | OpenAI API key (for GPT grader models) - **Required** |
+| `ANTHROPIC_API_KEY` | No | Anthropic API key (for Claude grader models) |
+| `GOOGLE_API_KEY` | No | Google API key (for Gemini grader models) |
+| `OPENROUTER_API_KEY` | No | OpenRouter API key (for multi-provider access) |
+| `TOGETHER_API_KEY` | No | Together AI API key (alternative: `TOGETHERAI_API_KEY`) |
+| `CHUTES_API_KEY` | No | Chutes API key (for Chutes provider, OpenAI-compatible API) |
 | `GITHUB_TOKEN` | No | GitHub personal access token (passed to letta-evals, useful if evaluations need GitHub access) |
-
-\* At least one model provider API key is required for evaluations to run (for the graders).
 
 **How Grader API Key Selection Works:**
 
@@ -279,6 +329,7 @@ When `provider: openai` is specified, `letta-evals` will use `OPENAI_API_KEY`. S
 - `provider: google` → uses `GOOGLE_API_KEY`
 - `provider: openrouter` → uses `OPENROUTER_API_KEY`
 - `provider: together` → uses `TOGETHER_API_KEY` or `TOGETHERAI_API_KEY`
+- `provider: chutes` → uses `CHUTES_API_KEY`
 
 **Summary:**
 - **Agent models**: Configured in the `.af` file, API keys needed on the **Letta server** (self-hosted)
