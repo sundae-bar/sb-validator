@@ -28,9 +28,11 @@ RUN pip3 install --no-cache-dir --break-system-packages -r requirements.lock
 
 # Copy Python files
 COPY python/run_with_graders.py /app/python/run_with_graders.py
+COPY python/agent_design.py /app/python/agent_design.py
 
 # Set permissions
 RUN chmod +x /app/python/run_with_graders.py
+RUN chmod +x /app/python/agent_design.py
 
 # Set PYTHONPATH
 ENV PYTHONPATH=/app/python:$PYTHONPATH

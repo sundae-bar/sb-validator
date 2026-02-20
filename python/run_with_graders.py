@@ -20,7 +20,11 @@ if MAX_STEPS_ENV:
     except ValueError:
         print(f"Warning: Invalid MAX_STEPS value '{MAX_STEPS_ENV}', using default {MAX_STEPS}", file=sys.stderr)
 
-print(f"✓ max_steps={MAX_STEPS} configured for Letta API calls", file=sys.stderr)
+# Control debug output via environment variable
+DEBUG_OUTPUT = os.getenv('LETTA_DEBUG', '').lower() in ('1', 'true', 'yes')
+
+if DEBUG_OUTPUT:
+    print(f"✓ max_steps={MAX_STEPS} configured for Letta API calls", file=sys.stderr)
 
 # Fix argv so it looks like: ['letta-evals', 'run', 'suite.yaml', '--output', '...']
 sys.argv[0] = 'letta-evals'
@@ -225,7 +229,8 @@ try:
                                     if agent_file_data.get("agents") and len(agent_file_data["agents"]) > 0:
                                         agent_schema = agent_file_data["agents"][0]
                                         folder_ids_from_file = agent_schema.get("folder_ids", []) or []
-                                        print(f"DEBUG: Found folder_ids in agent file: {folder_ids_from_file}", file=sys.stderr)
+                                        if DEBUG_OUTPUT:
+                                            print(f"DEBUG: Found folder_ids in agent file: {folder_ids_from_file}", file=sys.stderr)
                                 except json.JSONDecodeError as e:
                                     print(f"WARNING: Failed to parse agent file JSON: {e}", file=sys.stderr)
                             
@@ -257,16 +262,19 @@ try:
                         
                         # Get folder_ids from agent object or from file
                         folder_ids = getattr(agent, 'folder_ids', None) or folder_ids_from_file or []
-                        print(f"DEBUG: Agent {agent_id} folder_ids from object: {getattr(agent, 'folder_ids', None)}, from file: {folder_ids_from_file}, final: {folder_ids}", file=sys.stderr)
+                        if DEBUG_OUTPUT:
+                            print(f"DEBUG: Agent {agent_id} folder_ids from object: {getattr(agent, 'folder_ids', None)}, from file: {folder_ids_from_file}, final: {folder_ids}", file=sys.stderr)
                         
                         # Explicitly attach each folder to ensure files are attached
                         if folder_ids:
-                            print(f"DEBUG: Attaching {len(folder_ids)} folder(s) to agent {agent_id}", file=sys.stderr)
+                            if DEBUG_OUTPUT:
+                                print(f"DEBUG: Attaching {len(folder_ids)} folder(s) to agent {agent_id}", file=sys.stderr)
                             for folder_id in folder_ids:
                                 try:
                                     # Attach folder to agent (this will attach files from the folder)
                                     await self.client.agents.folders.attach(folder_id=folder_id, agent_id=agent_id)
-                                    print(f"DEBUG: Successfully attached folder {folder_id} to agent {agent_id}", file=sys.stderr)
+                                    if DEBUG_OUTPUT:
+                                        print(f"DEBUG: Successfully attached folder {folder_id} to agent {agent_id}", file=sys.stderr)
                                 except Exception as e:
                                     print(f"WARNING: Failed to attach folder {folder_id} to agent {agent_id}: {e}", file=sys.stderr)
                                     import traceback
@@ -287,9 +295,10 @@ try:
                                     'is_open': file.is_open
                                 })
                             if attached_files:
-                                print(f"DEBUG: Agent {agent_id} has {len(attached_files)} files attached:", file=sys.stderr)
-                                for f in attached_files:
-                                    print(f"DEBUG:   - {f['file_name']} (folder: {f['folder_name']}, open: {f['is_open']})", file=sys.stderr)
+                                if DEBUG_OUTPUT:
+                                    print(f"DEBUG: Agent {agent_id} has {len(attached_files)} files attached:", file=sys.stderr)
+                                    for f in attached_files:
+                                        print(f"DEBUG:   - {f['file_name']} (folder: {f['folder_name']}, open: {f['is_open']})", file=sys.stderr)
                             else:
                                 print(f"WARNING: Agent {agent_id} has NO files attached!", file=sys.stderr)
                         except Exception as e:
@@ -431,7 +440,8 @@ try:
             raise last_error or RuntimeError("Unexpected failure in agent run retry loop")
         
         LettaAgentTarget.run = patched_run
-        print(f"✓ Replaced LettaAgentTarget.run to use max_steps={MAX_STEPS} instead of hardcoded 100", file=sys.stderr)
+        if DEBUG_OUTPUT:
+            print(f"✓ Replaced LettaAgentTarget.run to use max_steps={MAX_STEPS} instead of hardcoded 100", file=sys.stderr)
 except Exception as e:
     print(f"ERROR: Error replacing LettaAgentTarget.run: {e}", file=sys.stderr)
     import traceback

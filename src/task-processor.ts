@@ -1675,51 +1675,55 @@ export class TaskProcessor {
       throw new Error('Failed to parse provided suite.yaml file: result is null/undefined');
     }
     
-    // Instead of parsing and re-dumping (which loses comments and formatting),
-    // use string replacement to preserve the original YAML structure exactly.
-    // This avoids potential issues with letta-evals expecting specific formatting.
-    let updatedYamlContent: string = suiteYamlContent;
-    
-    // Update dataset path using string replacement
+    // Modify suite config programmatically for reliable updates
+    // Update dataset path
     if (datasetPath) {
       const datasetBasename = path.basename(datasetPath);
-      // Replace dataset: ... with dataset: <basename>
-      updatedYamlContent = updatedYamlContent.replace(
-        /^dataset:\s*.+$/m,
-        `dataset: ${datasetBasename}`
-      );
+      suiteConfig.dataset = datasetBasename;
     }
     
-    // Update target.base_url using string replacement
-    if (targetBaseUrl) {
-      // Replace base_url: ... with base_url: <targetBaseUrl>
-      // Use a more specific regex that matches the exact indentation pattern
-      const beforeReplace = updatedYamlContent;
-      updatedYamlContent = updatedYamlContent.replace(
-        /^(\s+base_url:\s*).+$/m,
-        `$1${targetBaseUrl}`
-      );
-      
-      // Log if replacement didn't work (small, no full content)
-      if (beforeReplace === updatedYamlContent) {
-        logger.warn(
-          {
-            taskId: taskPayload.task_id,
-            targetBaseUrl,
-          },
-          'base_url replacement did not match any line - base_url may not exist in suite.yaml'
-        );
-      }
+    // Update target.base_url
+    if (targetBaseUrl && suiteConfig.target) {
+      suiteConfig.target.base_url = targetBaseUrl;
     }
     
-    // Update target.agent_file using string replacement
-    if (agentFilePath) {
+    // Update target.agent_file
+    if (agentFilePath && suiteConfig.target) {
       const agentBasename = path.basename(agentFilePath);
-      // Replace agent_file: ... with agent_file: <basename>
-      updatedYamlContent = updatedYamlContent.replace(
-        /^(\s+agent_file:\s*).+$/m,
-        `$1${agentBasename}`
+      suiteConfig.target.agent_file = agentBasename;
+    }
+    
+    // Update agent_design and blacklist grader's agent_file_path if they exist in suite.yaml
+    // The graders should already be configured in suite.yaml, we just update the path
+    const agentFileFullPath = agentFilePath 
+      ? path.join(workDir, path.basename(agentFilePath))
+      : path.join(workDir, 'agent.af');
+    
+    if (suiteConfig.graders?.agent_design?.extractor_config) {
+      suiteConfig.graders.agent_design.extractor_config.agent_file_path = agentFileFullPath;
+    }
+    if (suiteConfig.graders?.blacklist?.extractor_config) {
+      suiteConfig.graders.blacklist.extractor_config.agent_file_path = agentFileFullPath;
+    }
+    
+    // Dump the modified config back to YAML
+    let updatedYamlContent: string;
+    try {
+      updatedYamlContent = yaml.dump(suiteConfig, {
+        lineWidth: -1,
+        quotingType: '"' as const,
+        sortKeys: false,
+        indent: 2,
+      });
+    } catch (dumpError) {
+      logger.error(
+        {
+          taskId: taskPayload.task_id,
+          error: dumpError instanceof Error ? dumpError.message : String(dumpError),
+        },
+        'Failed to dump modified suite config to YAML'
       );
+      throw new Error(`Failed to dump suite.yaml: ${dumpError instanceof Error ? dumpError.message : String(dumpError)}`);
     }
     
     logger.debug(
@@ -1729,9 +1733,10 @@ export class TaskProcessor {
           datasetPath: datasetPath ? path.basename(datasetPath) : 'unchanged',
           targetBaseUrl: targetBaseUrl || 'unchanged',
           agentFile: agentFilePath ? path.basename(agentFilePath) : 'unchanged',
+          cheatingDetectionInjected: true,
         },
       },
-      'Modified suite.yaml using string replacement'
+      'Modified suite.yaml programmatically'
     );
     
     // Validate the updated YAML can still be parsed
@@ -1779,6 +1784,32 @@ export class TaskProcessor {
         },
         'Written suite.yaml content does not match expected content'
       );
+    }
+    
+    // Copy agent_design.py to work directory if agent_design or blacklist grader exists
+    if (suiteConfig.graders?.agent_design || suiteConfig.graders?.blacklist) {
+      const agentDesignPath = path.join(workDir, 'agent_design.py');
+      // Use absolute path to Python file in Docker container
+      const agentDesignSource = '/app/python/agent_design.py';
+      
+      try {
+        await fs.copyFile(agentDesignSource, agentDesignPath);
+        logger.debug(
+          { taskId: taskPayload.task_id, agentDesignPath },
+          'PrepareFiles: copied agent_design.py to work directory'
+        );
+      } catch (error) {
+        logger.error(
+          {
+            taskId: taskPayload.task_id,
+            source: agentDesignSource,
+            dest: agentDesignPath,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'PrepareFiles: failed to copy agent_design.py'
+        );
+        // Don't fail the entire task - grader might not be used
+      }
     }
     
     logger.debug({
@@ -2004,11 +2035,51 @@ export class TaskProcessor {
       }
       console.log('='.repeat(80) + '\n');
 
-      const { stdout, stderr } = await execAsync(cmd, {
-        cwd: suiteDir,
-        env,
-        maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large outputs
-      });
+      let stdout = '';
+      let stderr = '';
+      let commandFailed = false;
+      let gateFailed = false;
+
+      try {
+        const result = await execAsync(cmd, {
+          cwd: suiteDir,
+          env,
+          maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large outputs
+        });
+        stdout = result.stdout || '';
+        stderr = result.stderr || '';
+      } catch (error: any) {
+        // Command exited with non-zero code - check if it's just a gate failure
+        commandFailed = true;
+        stdout = error.stdout || '';
+        stderr = error.stderr || '';
+        
+        // Check if this is a gate failure (results may still be valid)
+        const isGateFailure = stdout.includes('Some gates failed') || 
+                             stdout.includes('Gate:') ||
+                             stderr.includes('Some gates failed');
+        
+        if (isGateFailure) {
+          gateFailed = true;
+          // Log the nicely formatted stdout so user can see results
+          if (stdout) {
+            logger.info({ stdout }, 'Evaluation completed but gate failed - results below');
+          }
+          if (stderr && !stderr.includes('Some gates failed')) {
+            logger.warn({ stderr: stderr.substring(0, 500) }, 'letta-evals stderr output');
+          }
+        } else {
+          // Real error - log it but still try to parse results if they exist
+          logger.warn(
+            { 
+              error: error.message,
+              stdout: stdout.substring(0, 500),
+              stderr: stderr.substring(0, 500)
+            },
+            'Evaluation command failed - will attempt to parse results if available'
+          );
+        }
+      }
 
       // Log stdout for debugging (letta-evals may output progress info here)
       // if (stdout) {
@@ -2016,7 +2087,10 @@ export class TaskProcessor {
       // }
 
       if (stderr) {
-        logger.warn({ stderr }, 'letta-evals stderr output');
+        // Only log stderr as warning if it's not just a gate failure
+        if (!gateFailed) {
+          logger.warn({ stderr }, 'letta-evals stderr output');
+        }
         
         // Check for common error patterns in stderr
         if (stderr.includes('401') || stderr.includes('Unauthorized')) {
@@ -2198,12 +2272,33 @@ export class TaskProcessor {
       }
 
       // Validate that we got at least some results
-      // If letta-evals exits with 0 but produces no output, something went wrong
+      // If letta-evals exits with non-zero but produces no output, something went wrong
       if (!summary && results.length === 0) {
+        // If command failed and no results, it's a real error
+        if (commandFailed && !gateFailed) {
+          throw new Error(
+            'Evaluation failed and produced no results. ' +
+            'No summary.json or results.jsonl found. ' +
+            `Command error: ${stderr.substring(0, 500)}`
+          );
+        }
+        // If gate failed but no results, still an error
         throw new Error(
           'Evaluation completed but produced no results. ' +
           'No summary.json or results.jsonl found. ' +
           'This may indicate letta-evals failed silently.'
+        );
+      }
+
+      // If gate failed but we have results, log it as a warning and continue
+      if (gateFailed && results.length > 0) {
+        logger.info(
+          {
+            gateFailed: true,
+            resultsCount: results.length,
+            summaryExists: !!summary
+          },
+          'Gate failed but results are available - returning results with gate failure noted'
         );
       }
 
@@ -2382,38 +2477,78 @@ export class TaskProcessor {
         
         totalTokens += gradingTokens;
         
-        // Calculate weighted average score from individual graders
-        let weightedScore: number | undefined = undefined;
+        // Calculate score: scout_rubric_grader if both gates pass, otherwise 0
+        let finalScore: number | undefined = undefined;
         if (grades && Object.keys(grades).length > 0) {
-          let totalWeight = 0;
-          let weightedSum = 0;
+          const blacklistScore = grades.blacklist?.score;
+          const agentDesignScore = grades.agent_design?.score;
+          const rubricScore = grades.scout_rubric_grader?.score;
           
-          for (const [graderName, grader] of Object.entries(grades)) {
-            const graderScore = grader?.score;
-            if (graderScore !== undefined && graderScore !== null) {
-              const weight = graderWeights[graderName] ?? (1 / Object.keys(grades).length); // Default to equal weight if not specified
-              weightedSum += graderScore * weight;
-              totalWeight += weight;
-            }
-          }
+          // Both gates must pass (score === 1.0) for rubric score to count
+          const blacklistPassed = blacklistScore === 1.0 || blacklistScore === undefined;
+          const agentDesignPassed = agentDesignScore === 1.0 || agentDesignScore === undefined;
           
-          if (totalWeight > 0) {
-            weightedScore = weightedSum / totalWeight;
-            weightedScore = roundScore(weightedScore);
+          if (blacklistPassed && agentDesignPassed && rubricScore !== undefined && rubricScore !== null) {
+            finalScore = roundScore(rubricScore);
+          } else {
+            // Either gate failed, score is 0
+            finalScore = 0;
           }
         }
         
-        // Use weighted score for token calculation
+        // Use final score for token calculation
         // Note: score is 0–1, where 1 = 100%. We want "tokens per 1%" so we divide by 100.
         // Example: if score = 0.8 and totalTokens = 8000,
         //   tokens per 1.0 score  = 8000 / 0.8  = 10000
         //   tokens per 1% score   = 10000 / 100 = 100
-        const score = weightedScore ?? 0;
+        const score = finalScore ?? 0;
         const tokenPerScorePercent = score > 0 ? totalTokens / (score * 100) : undefined;
         
-        // Store weighted score in result data for display
-        if (weightedScore !== undefined) {
-          resultData.weighted_score = weightedScore;
+        // Store final score in result data for display
+        if (finalScore !== undefined) {
+          resultData.weighted_score = finalScore;
+        }
+        
+        // Update rationale based on gate status
+        // If gates passed: only use rubric rationale
+        // If gates failed: combine blacklist and agent_design rationales with rubric
+        if (grades && Object.keys(grades).length > 0) {
+          const blacklistScore = grades.blacklist?.score;
+          const agentDesignScore = grades.agent_design?.score;
+          const blacklistPassed = blacklistScore === 1.0 || blacklistScore === undefined;
+          const agentDesignPassed = agentDesignScore === 1.0 || agentDesignScore === undefined;
+          const gatesPassed = blacklistPassed && agentDesignPassed;
+          
+          const rubricRationale = grades.scout_rubric_grader?.rationale as string | undefined;
+          const blacklistRationale = grades.blacklist?.rationale as string | undefined;
+          const agentDesignRationale = grades.agent_design?.rationale as string | undefined;
+          
+          let combinedRationale: string | undefined = undefined;
+          
+          if (gatesPassed) {
+            // Gates passed: only show rubric rationale
+            combinedRationale = rubricRationale;
+          } else {
+            // Gates failed: combine all relevant rationales
+            const rationales: string[] = [];
+            
+            if (blacklistRationale) {
+              rationales.push(`Blacklist: ${blacklistRationale}`);
+            }
+            if (agentDesignRationale) {
+              rationales.push(`Agent Design: ${agentDesignRationale}`);
+            }
+            if (rubricRationale) {
+              rationales.push(`Rubric: ${rubricRationale}`);
+            }
+            
+            combinedRationale = rationales.length > 0 ? rationales.join(' | ') : rubricRationale;
+          }
+          
+          // Update the grade rationale if we have a combined one
+          if (combinedRationale && resultData.grade && typeof resultData.grade === 'object') {
+            (resultData.grade as { rationale?: string }).rationale = combinedRationale;
+          }
         }
         
         // Add performance key
@@ -2605,20 +2740,27 @@ export class TaskProcessor {
         console.log(`┌─ RESULT ${index + 1}: ${sampleId}`);
         console.log('│');
         
-        // Display weighted average score
+        // Check gate status for rationale display
+        const blacklistScore = grades?.blacklist?.score;
+        const agentDesignScore = grades?.agent_design?.score;
+        const blacklistPassed = blacklistScore === 1.0 || blacklistScore === undefined;
+        const agentDesignPassed = agentDesignScore === 1.0 || agentDesignScore === undefined;
+        const gatesPassed = blacklistPassed && agentDesignPassed;
+        const anyGateFailed = !blacklistPassed || !agentDesignPassed;
+        
+        // Display final score
         if (weightedScore !== undefined) {
-          console.log(`│  Score: ${weightedScore.toFixed(5)} (weighted avg)`);
+          console.log(`│  Score: ${weightedScore.toFixed(5)}`);
           weightedScores.push(weightedScore);
         } else if (grades && Object.keys(grades).length > 0) {
-          // Fallback: calculate simple average if weights not available
-          const scores = Object.values(grades)
-            .map(g => (g as { score?: number })?.score)
-            .filter((s): s is number => typeof s === 'number');
-          if (scores.length > 0) {
-            const avgScore = scores.reduce((sum, s) => sum + s, 0) / scores.length;
-            console.log(`│  Score: ${avgScore.toFixed(5)} (avg)`);
-            weightedScores.push(avgScore);
+          // Fallback: calculate score using gate logic
+          const rubricScore = grades.scout_rubric_grader?.score;
+          let fallbackScore = 0;
+          if (gatesPassed && rubricScore !== undefined && rubricScore !== null) {
+            fallbackScore = rubricScore;
           }
+          console.log(`│  Score: ${fallbackScore.toFixed(5)}`);
+          weightedScores.push(fallbackScore);
         }
 
         // Individual grader scores if available
@@ -2631,8 +2773,15 @@ export class TaskProcessor {
             if (graderScore !== undefined && graderScore !== null) {
               console.log(`│    • ${graderName}: ${graderScore.toFixed(5)}`);
               
-              // Display rationale if available, nicely formatted
-              if (graderRationale) {
+              // Display rationale based on gate status:
+              // - If gates passed: only show rubric rationale (exclude blacklist and agent_design)
+              // - If any gate failed: show both blacklist and agent_design rationales (even if one passed)
+              // - Always show rubric rationale
+              const shouldShowRationale = 
+                (graderName === 'scout_rubric_grader') || // Always show rubric
+                (anyGateFailed && (graderName === 'blacklist' || graderName === 'agent_design')); // Show both gate rationales if any gate failed
+              
+              if (shouldShowRationale && graderRationale) {
                 // Wrap long rationales to fit within the box width (accounting for indentation)
                 const maxWidth = 60; // Max width for rationale text
                 const indent = '│      '; // Indentation for rationale lines
@@ -2704,31 +2853,15 @@ export class TaskProcessor {
       console.log('┌─ SUMMARY');
       console.log('│');
       
-      // Calculate our own average of weighted scores for verification
+      // Calculate our own average using gate-based scoring logic
       let calculatedAvg: number | undefined = undefined;
       if (weightedScores.length > 0) {
         calculatedAvg = weightedScores.reduce((sum, s) => sum + s, 0) / weightedScores.length;
-        console.log(`│  Calculated Avg (from weighted scores): ${calculatedAvg.toFixed(5)}`);
+        console.log(`│  Final Score (gate-based): ${calculatedAvg.toFixed(5)}`);
+        console.log(`│    (rubric score if gates pass, 0 if gates fail)`);
       }
       
       if (metrics) {
-        if (metrics.avg_score_total !== undefined) {
-          const lettaAvg = metrics.avg_score_total;
-          console.log(`│  AETS avg_score_total: ${lettaAvg.toFixed(5)}`);
-          
-          // Compare our calculation with letta-evals
-          if (calculatedAvg !== undefined) {
-            const diff = Math.abs(calculatedAvg - lettaAvg);
-            // if (diff < 0.001) {
-            //   console.log(`│  ✓ Match! (difference: ${diff.toFixed(6)})`);
-            // } else {
-            //   console.log(`│  ⚠ Mismatch! (difference: ${diff.toFixed(6)})`);
-            // }
-          }
-        }
-        if (metrics.avg_score_attempted !== undefined) {
-          console.log(`│  Avg Score (Attempted): ${metrics.avg_score_attempted.toFixed(5)}`);
-        }
 
         // By metric breakdown
         if (metrics.by_metric && typeof metrics.by_metric === 'object') {
