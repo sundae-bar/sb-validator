@@ -2031,11 +2031,7 @@ export class TaskProcessor {
     const pythonCmd = process.env.LETTA_EVALS_PYTHON || 'python3';
     const cliModule = process.env.LETTA_EVALS_MODULE || 'letta_evals.cli';
     
-    // Read MAX_TOKENS_PER_EVAL and MAX_CONCURRENT_EVALS for batch processing
-    const maxTokensPerEval = process.env.MAX_TOKENS_PER_EVAL 
-      ? parseInt(process.env.MAX_TOKENS_PER_EVAL, 10) 
-      : 50000; // Default: 50000
-    
+    // Read MAX_CONCURRENT_EVALS for batch processing
     const maxConcurrentEvals = process.env.MAX_CONCURRENT_EVALS
       ? Math.min(parseInt(process.env.MAX_CONCURRENT_EVALS, 10), 20) // Cap at 20
       : 2; // Default: 2 (for testing token limit)
@@ -2084,13 +2080,77 @@ export class TaskProcessor {
       logger.warn({ error: error instanceof Error ? error.message : String(error) }, 'Could not verify dataset file (suite.yaml may use external dataset)');
     }
     
-    // If no MAX_TOKENS_PER_EVAL is set or no dataset, run normally (no batching)
+    // Calculate max tokens per evaluation
+    // Priority: MAX_TOKENS_PER_EVAL (override) > TOKENS_PER_TEST_CASE * totalSamples (calculated)
+    const ABSOLUTE_MAX_TOKENS = 10000000; // 10 million tokens absolute maximum
+    
+    let maxTokensPerEval: number;
+    let tokensPerTestCase: number | null = null;
+    let calculatedMaxTokens: number | null = null;
+    let usingOverrideMode = false;
+    
+    if (process.env.MAX_TOKENS_PER_EVAL) {
+      // Override mode: use MAX_TOKENS_PER_EVAL directly
+      maxTokensPerEval = parseInt(process.env.MAX_TOKENS_PER_EVAL, 10);
+      usingOverrideMode = true;
+      logger.info(
+        { maxTokensPerEval, absoluteMaxCap: ABSOLUTE_MAX_TOKENS },
+        'Using MAX_TOKENS_PER_EVAL override mode'
+      );
+    } else {
+      // Calculated mode: TOKENS_PER_TEST_CASE * totalSamples
+      tokensPerTestCase = process.env.TOKENS_PER_TEST_CASE
+        ? parseInt(process.env.TOKENS_PER_TEST_CASE, 10)
+        : 25000; // Default: 25,000 tokens per test case
+      
+      if (totalSamples > 0) {
+        calculatedMaxTokens = tokensPerTestCase * totalSamples;
+        maxTokensPerEval = calculatedMaxTokens;
+        logger.info(
+          { tokensPerTestCase, totalSamples, calculatedMaxTokens, absoluteMaxCap: ABSOLUTE_MAX_TOKENS },
+          'Using calculated token limit (TOKENS_PER_TEST_CASE * totalSamples)'
+        );
+      } else {
+        // No dataset or can't count samples - use default
+        maxTokensPerEval = tokensPerTestCase;
+        logger.info(
+          { tokensPerTestCase, maxTokensPerEval, absoluteMaxCap: ABSOLUTE_MAX_TOKENS },
+          'Using default token limit (no dataset found)'
+        );
+      }
+    }
+    
+    // Apply absolute maximum cap
+    const finalMaxTokens = Math.min(maxTokensPerEval, ABSOLUTE_MAX_TOKENS);
+    if (finalMaxTokens < maxTokensPerEval) {
+      logger.warn(
+        {
+          originalMaxTokens: maxTokensPerEval,
+          absoluteMaxCap: ABSOLUTE_MAX_TOKENS,
+          finalMaxTokens,
+          cappedBy: finalMaxTokens === ABSOLUTE_MAX_TOKENS ? 'absolute_max' : 'unknown'
+        },
+        'Token limit capped by absolute maximum'
+      );
+    }
+    maxTokensPerEval = finalMaxTokens;
+    
+    // If no token limit is configured or no dataset, run normally (no batching)
     const useBatching = maxTokensPerEval > 0 && originalDatasetPath !== null;
     
     try {
     if (useBatching) {
       logger.info(
-        { maxTokensPerEval, maxConcurrentEvals, totalSamples, datasetPath: originalDatasetPath },
+        {
+          maxTokensPerEval,
+          maxConcurrentEvals,
+          totalSamples,
+          datasetPath: originalDatasetPath,
+          tokensPerTestCase: tokensPerTestCase ?? undefined,
+          calculatedMaxTokens: calculatedMaxTokens ?? undefined,
+          absoluteMaxCap: ABSOLUTE_MAX_TOKENS,
+          usingOverrideMode
+        },
         'Using batch processing with token limit'
       );
     }
@@ -2558,6 +2618,10 @@ export class TaskProcessor {
             maxTokensPerEval,
             totalSamples,
             evaluatedSamples: allResults.length,
+            tokensPerTestCase: tokensPerTestCase ?? undefined,
+            calculatedMaxTokens: calculatedMaxTokens ?? undefined,
+            absoluteMaxCap: ABSOLUTE_MAX_TOKENS,
+            usingOverrideMode,
             scoreSummary,
             averageScore: Math.round(averageScore * 1000) / 1000,
             breakdown: {
