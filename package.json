@@ -1,13 +1,15 @@
 {
   "name": "sundae-bar-validator",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Secure validator client for sundae_bar SN121 subnet",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "docker:build": "docker buildx build --platform linux/amd64,linux/arm64 -t sundaebarai/sn121-validator:latest -t sundaebarai/sn121-validator:$(node -p \"require('./package.json').version\") .",
+    "docker:push": "docker buildx build --platform linux/amd64,linux/arm64 -t sundaebarai/sn121-validator:latest -t sundaebarai/sn121-validator:$(node -p \"require('./package.json').version\") --push ."
   },
   "keywords": ["validator", "bittensor", "letta", "evaluation"],
   "author": "",

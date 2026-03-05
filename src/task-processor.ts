@@ -1833,6 +1833,148 @@ export class TaskProcessor {
    */
 
   /**
+   * Split dataset into batches
+   */
+  private async splitDatasetIntoBatches(
+    datasetPath: string,
+    batchSize: number,
+    workDir: string
+  ): Promise<string[]> {
+    const content = await fs.readFile(datasetPath, 'utf-8');
+    const lines = content.split('\n').filter(line => line.trim());
+    
+    const batchPaths: string[] = [];
+    const totalBatches = Math.ceil(lines.length / batchSize);
+    
+    for (let i = 0; i < totalBatches; i++) {
+      const batchLines = lines.slice(i * batchSize, (i + 1) * batchSize);
+      const batchPath = path.join(workDir, `dataset_batch_${i}.jsonl`);
+      await fs.writeFile(batchPath, batchLines.join('\n') + '\n', 'utf-8');
+      batchPaths.push(batchPath);
+    }
+    
+    logger.debug(
+      { datasetPath, batchSize, totalBatches, totalSamples: lines.length },
+      'Split dataset into batches'
+    );
+    
+    return batchPaths;
+  }
+
+  /**
+   * Create a temporary suite.yaml for a batch
+   */
+  private async createBatchSuiteYaml(
+    originalSuitePath: string,
+    batchDatasetPath: string,
+    workDir: string,
+    batchIndex: number
+  ): Promise<string> {
+    const suiteContent = await fs.readFile(originalSuitePath, 'utf-8');
+    const suiteConfig = yaml.load(suiteContent) as any;
+    
+    // Update dataset path to point to batch dataset
+    suiteConfig.dataset = path.basename(batchDatasetPath);
+    
+    const batchSuitePath = path.join(workDir, `suite_batch_${batchIndex}.yaml`);
+    const batchSuiteContent = yaml.dump(suiteConfig);
+    await fs.writeFile(batchSuitePath, batchSuiteContent, 'utf-8');
+    
+    return batchSuitePath;
+  }
+
+  /**
+   * Calculate total tokens from results
+   */
+  private calculateTotalTokensFromResults(results: unknown[]): number {
+    let totalTokens = 0;
+    
+    for (const result of results) {
+      if (typeof result !== 'object' || result === null) continue;
+      
+      const resultObj = result as Record<string, unknown>;
+      const resultData = resultObj.result as Record<string, unknown> | undefined;
+      
+      if (!resultData) continue;
+      
+      // Sum agent tokens
+      const agentUsage = resultData.agent_usage as Array<{
+        total_tokens?: number;
+        [key: string]: unknown;
+      }> | undefined;
+      
+      if (agentUsage && Array.isArray(agentUsage) && agentUsage.length > 0) {
+        const agentTokens = agentUsage.reduce((sum, usage) => {
+          return sum + (usage.total_tokens || 0);
+        }, 0);
+        totalTokens += agentTokens;
+      }
+      
+      // Add grading tokens from all graders
+      const grades = resultData.grades as Record<string, { 
+        metadata?: { usage?: { total_tokens?: number } };
+        [key: string]: unknown;
+      }> | undefined;
+      
+      if (grades) {
+        for (const graderName of Object.keys(grades)) {
+          const grader = grades[graderName];
+          const graderMetadata = grader?.metadata as { usage?: { total_tokens?: number } } | undefined;
+          if (graderMetadata?.usage?.total_tokens) {
+            totalTokens += graderMetadata.usage.total_tokens;
+          }
+        }
+      }
+    }
+    
+    return totalTokens;
+  }
+
+  /**
+   * Create a zero-score result for padding
+   */
+  private createZeroScoreResult(
+    sampleId: string,
+    reason: string
+  ): unknown {
+    return {
+      sample: {
+        id: sampleId,
+        input: '',
+        ground_truth: null,
+      },
+      result: {
+        submission: '',
+        grade: {
+          score: 0,
+          rationale: reason,
+        },
+        grades: {
+          blacklist: {
+            score: 0,
+            rationale: reason,
+          },
+          agent_design: {
+            score: 0,
+            rationale: reason,
+          },
+          scout_rubric_grader: {
+            score: 0,
+            rationale: reason,
+          },
+        },
+        agent_usage: [],
+        performance: {
+          total_tokens: 0,
+          av_tokens: 0,
+          token_per_score_point: undefined,
+          av_steps: 0,
+        },
+      },
+    };
+  }
+
+  /**
    * Run letta-evals evaluation
    */
   private async runEvaluation(
@@ -1889,8 +2031,19 @@ export class TaskProcessor {
     const pythonCmd = process.env.LETTA_EVALS_PYTHON || 'python3';
     const cliModule = process.env.LETTA_EVALS_MODULE || 'letta_evals.cli';
     
+    // Read MAX_TOKENS_PER_EVAL and MAX_CONCURRENT_EVALS for batch processing
+    const maxTokensPerEval = process.env.MAX_TOKENS_PER_EVAL 
+      ? parseInt(process.env.MAX_TOKENS_PER_EVAL, 10) 
+      : 50000; // Default: 50000
+    
+    const maxConcurrentEvals = process.env.MAX_CONCURRENT_EVALS
+      ? Math.min(parseInt(process.env.MAX_CONCURRENT_EVALS, 10), 20) // Cap at 20
+      : 2; // Default: 2 (for testing token limit)
+    
     // Verify dataset file exists before validation/execution
     // Parse suite.yaml to get dataset path
+    let originalDatasetPath: string | null = null;
+    let totalSamples = 0;
     try {
       const suiteYamlContent = await fs.readFile(suitePath, 'utf-8');
       const suiteConfig = yaml.load(suiteYamlContent) as any;
@@ -1899,12 +2052,18 @@ export class TaskProcessor {
           ? suiteConfig.dataset 
           : path.join(suiteDir, suiteConfig.dataset);
         
+        originalDatasetPath = datasetPath;
+        
         try {
           await fs.access(datasetPath);
           const stats = await fs.stat(datasetPath);
           if (stats.size === 0) {
             throw new Error(`Dataset file is empty: ${datasetPath}`);
           }
+          
+          // Count total samples for padding
+          const datasetContent = await fs.readFile(datasetPath, 'utf-8');
+          totalSamples = datasetContent.split('\n').filter(line => line.trim()).length;
         } catch (error) {
           logger.error(
             { 
@@ -1923,6 +2082,17 @@ export class TaskProcessor {
         throw error;
       }
       logger.warn({ error: error instanceof Error ? error.message : String(error) }, 'Could not verify dataset file (suite.yaml may use external dataset)');
+    }
+    
+    // If no MAX_TOKENS_PER_EVAL is set or no dataset, run normally (no batching)
+    const useBatching = maxTokensPerEval > 0 && originalDatasetPath !== null;
+    
+    try {
+    if (useBatching) {
+      logger.info(
+        { maxTokensPerEval, maxConcurrentEvals, totalSamples, datasetPath: originalDatasetPath },
+        'Using batch processing with token limit'
+      );
     }
     
     // First, validate the suite configuration
@@ -1961,7 +2131,472 @@ export class TaskProcessor {
       throw new Error(`Suite validation failed: ${validateMessage}${validateStderr ? '\n' + validateStderr : ''}`);
     }
 
-    // Now run the evaluation using wrapper script
+    // Prepare for batch processing or single evaluation
+    let results: unknown[] = [];
+    let summary: Record<string, unknown> | null = null;
+    let allResults: unknown[] = [];
+    let allSummaries: Record<string, unknown>[] = [];
+    let totalTokensUsed = 0;
+    let batchFilesToCleanup: string[] = [];
+    
+    if (useBatching) {
+      // Split dataset into batches
+      const batchPaths = await this.splitDatasetIntoBatches(
+        originalDatasetPath!,
+        maxConcurrentEvals,
+        outputDir
+      );
+      batchFilesToCleanup.push(...batchPaths);
+      
+      logger.info(
+        { batchCount: batchPaths.length, batchSize: maxConcurrentEvals },
+        'Split dataset into batches for token-limited evaluation'
+      );
+      
+      // Process batches sequentially
+      for (let batchIndex = 0; batchIndex < batchPaths.length; batchIndex++) {
+        const batchDatasetPath = batchPaths[batchIndex];
+        const batchOutputDir = path.join(outputDir, `batch_${batchIndex}`);
+        await fs.mkdir(batchOutputDir, { recursive: true });
+        
+        // Create temporary suite.yaml for this batch
+        const batchSuitePath = await this.createBatchSuiteYaml(
+          suitePath,
+          batchDatasetPath,
+          outputDir,
+          batchIndex
+        );
+        batchFilesToCleanup.push(batchSuitePath);
+        
+        const batchSuiteFile = path.basename(batchSuitePath);
+        
+        logger.info(
+          { batchIndex: batchIndex + 1, totalBatches: batchPaths.length, batchDatasetPath },
+          'Processing batch'
+        );
+        
+        // Run evaluation for this batch
+        const batchCmd = `${pythonCmd} /app/python/run_with_graders.py run "${batchSuiteFile}" --output "${batchOutputDir}"`;
+        
+        try {
+          // Prepare environment variables (same as below)
+          const env: Record<string, string> = {
+            ...process.env,
+            PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
+          };
+          
+          // Add API keys and other env vars (same logic as below)
+          if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+          if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+          if (process.env.GOOGLE_API_KEY) env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+          if (process.env.OPENROUTER_API_KEY) env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+          if (process.env.TOGETHER_API_KEY) env.TOGETHER_API_KEY = process.env.TOGETHER_API_KEY;
+          if (process.env.TOGETHERAI_API_KEY) env.TOGETHERAI_API_KEY = process.env.TOGETHERAI_API_KEY;
+          if (process.env.GITHUB_TOKEN) env.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+          if (process.env.MAX_STEPS) env.MAX_STEPS = process.env.MAX_STEPS;
+          if (process.env.LETTA_BASE_URL) {
+            env.LETTA_BASE_URL = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
+          } else if (process.env.LETTA_URL) {
+            env.LETTA_BASE_URL = process.env.LETTA_URL.trim().replace(/^["']|["']$/g, '');
+          }
+          
+          // Run batch evaluation
+          let batchStdout = '';
+          let batchStderr = '';
+          let batchCommandFailed = false;
+          let batchGateFailed = false;
+          
+          try {
+            const batchResult = await execAsync(batchCmd, {
+              cwd: outputDir, // Use outputDir so batch suite.yaml is found
+              env,
+              maxBuffer: 10 * 1024 * 1024
+            });
+            batchStdout = batchResult.stdout || '';
+            batchStderr = batchResult.stderr || '';
+          } catch (error: any) {
+            // Command exited with non-zero code - check if it's just a gate failure
+            batchCommandFailed = true;
+            batchStdout = error.stdout || '';
+            batchStderr = error.stderr || '';
+            
+            // Check if this is a gate failure (results may still be valid)
+            const isGateFailure = batchStdout.includes('Some gates failed') || 
+                                 batchStdout.includes('Gate:') ||
+                                 batchStderr.includes('Some gates failed');
+            
+            if (isGateFailure) {
+              batchGateFailed = true;
+              // Log the nicely formatted stdout so user can see results
+              if (batchStdout) {
+                logger.info({ stdout: batchStdout }, 'Batch evaluation completed but gate failed - results below');
+              }
+              if (batchStderr && !batchStderr.includes('Some gates failed')) {
+                logger.warn({ stderr: batchStderr.substring(0, 500) }, 'letta-evals stderr output');
+              }
+            } else {
+              // Real error - log it but still try to parse results if they exist
+              logger.warn(
+                { 
+                  error: error.message,
+                  stdout: batchStdout.substring(0, 500),
+                  stderr: batchStderr.substring(0, 500)
+                },
+                'Batch evaluation command failed - will attempt to parse results if available'
+              );
+            }
+          }
+          
+          // Read batch results (even if command failed, results may still be valid)
+          const batchResultsPath = path.join(batchOutputDir, 'results.jsonl');
+          const batchSummaryPath = path.join(batchOutputDir, 'summary.json');
+          
+          let batchResults: unknown[] = [];
+          let batchSummary: Record<string, unknown> | null = null;
+          
+          try {
+            await fs.access(batchResultsPath);
+            const batchResultsContent = await fs.readFile(batchResultsPath, 'utf-8');
+            for (const line of batchResultsContent.split('\n')) {
+              const trimmed = line.trim();
+              if (trimmed) {
+                batchResults.push(JSON.parse(trimmed));
+              }
+            }
+          } catch (error) {
+            logger.warn({ error, batchResultsPath }, 'Failed to read batch results.jsonl');
+          }
+          
+          try {
+            await fs.access(batchSummaryPath);
+            const batchSummaryContent = await fs.readFile(batchSummaryPath, 'utf-8');
+            batchSummary = JSON.parse(batchSummaryContent);
+          } catch (error) {
+            logger.warn({ error, batchSummaryPath }, 'Failed to read batch summary.json');
+          }
+          
+          // If we got no results and it wasn't just a gate failure, that's a real error
+          if (batchResults.length === 0 && !batchGateFailed && batchCommandFailed) {
+            throw new Error(
+              'Batch evaluation failed and produced no results. ' +
+              'No summary.json or results.jsonl found. ' +
+              `Command error: ${batchStderr.substring(0, 500)}`
+            );
+          }
+          
+          // Calculate tokens used in this batch
+          const batchTokens = this.calculateTotalTokensFromResults(batchResults);
+          const tokensBeforeBatch = totalTokensUsed;
+          totalTokensUsed += batchTokens;
+          
+          logger.info(
+            {
+              batchIndex: batchIndex + 1,
+              batchTokens,
+              totalTokensUsed,
+              maxTokensPerEval,
+              batchResultsCount: batchResults.length
+            },
+            'Batch completed'
+          );
+          
+          // Check if this batch pushed us over the limit
+          if (totalTokensUsed >= maxTokensPerEval && tokensBeforeBatch < maxTokensPerEval) {
+            // This batch pushed us over the limit - need to pro-rate and zero out samples
+            const tokensRemaining = maxTokensPerEval - tokensBeforeBatch;
+            const tokensOverLimit = totalTokensUsed - maxTokensPerEval;
+            
+            logger.warn(
+              {
+                totalTokensUsed,
+                maxTokensPerEval,
+                tokensBeforeBatch,
+                tokensRemaining,
+                tokensOverLimit,
+                batchIndex: batchIndex + 1,
+                totalBatches: batchPaths.length
+              },
+              'Token limit reached during batch - pro-rating and zeroing samples'
+            );
+            
+            // Process batch results: pro-rate first sample that exceeded, zero out rest
+            const processedBatchResults: unknown[] = [];
+            let tokensProcessed = 0;
+            
+            for (let i = 0; i < batchResults.length; i++) {
+              const result = batchResults[i];
+              if (typeof result !== 'object' || result === null) {
+                processedBatchResults.push(result);
+                continue;
+              }
+              
+              const resultObj = result as Record<string, unknown>;
+              const resultData = resultObj.result as Record<string, unknown> | undefined;
+              
+              if (!resultData) {
+                processedBatchResults.push(result);
+                continue;
+              }
+              
+              // Calculate tokens for this sample
+              const sampleTokens = this.calculateTotalTokensFromResults([result]);
+              const tokensAfterThisSample = tokensBeforeBatch + tokensProcessed + sampleTokens;
+              
+              if (tokensAfterThisSample <= maxTokensPerEval) {
+                // This sample fits within the limit - add it fully
+                processedBatchResults.push(result);
+                tokensProcessed += sampleTokens;
+              } else if (tokensBeforeBatch + tokensProcessed < maxTokensPerEval) {
+                // This sample pushed us over - pro-rate it
+                const tokensAllowed = maxTokensPerEval - (tokensBeforeBatch + tokensProcessed);
+                const prorationFactor = tokensAllowed / sampleTokens;
+                
+                logger.info(
+                  {
+                    sampleIndex: i + 1,
+                    sampleTokens,
+                    tokensAllowed,
+                    prorationFactor,
+                    originalScore: (resultData.grade as { score?: number })?.score
+                  },
+                  'Pro-rating sample that exceeded token limit'
+                );
+                
+                // Pro-rate the score
+                // Note: Only pro-rate the rubric score, not gate scores (blacklist/agent_design)
+                // Gates should remain pass/fail (1.0 or 0), only the final rubric score is pro-rated
+                const grades = resultData.grades as Record<string, { score?: number; rationale?: string } | undefined>;
+                if (grades) {
+                  for (const graderName in grades) {
+                    const grader = grades[graderName];
+                    if (grader && typeof grader.score === 'number') {
+                      // Only pro-rate rubric score, keep gate scores as-is (they're pass/fail)
+                      if (graderName === 'scout_rubric_grader') {
+                        grader.score = Math.round(grader.score * prorationFactor * 1000) / 1000;
+                        grader.rationale = `${grader.rationale || ''} [Score pro-rated to ${(prorationFactor * 100).toFixed(1)}% due to token limit: ${tokensAllowed}/${sampleTokens} tokens allowed]`;
+                      } else {
+                        // For gate scores, add note but don't pro-rate (they're pass/fail)
+                        grader.rationale = `${grader.rationale || ''} [Evaluation partially completed due to token limit: ${tokensAllowed}/${sampleTokens} tokens allowed]`;
+                      }
+                    }
+                  }
+                }
+                
+                // Update main grade score
+                const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
+                if (grade && typeof grade.score === 'number') {
+                  grade.score = Math.round(grade.score * prorationFactor * 1000) / 1000;
+                  grade.rationale = `${grade.rationale || ''} [Score pro-rated to ${(prorationFactor * 100).toFixed(1)}% due to token limit]`;
+                }
+                
+                // Update weighted_score if present
+                if (typeof resultData.weighted_score === 'number') {
+                  resultData.weighted_score = Math.round(resultData.weighted_score * prorationFactor * 1000) / 1000;
+                }
+                
+                processedBatchResults.push(result);
+                tokensProcessed += tokensAllowed; // Only count the allowed portion
+              } else {
+                // This sample is after we already exceeded - zero it out
+                const sample = resultObj.sample as { id?: string } | undefined;
+                const sampleId = sample?.id || `sample_${i}`;
+                
+                logger.info(
+                  { sampleIndex: i + 1, sampleId },
+                  'Zeroing out sample that exceeded token limit'
+                );
+                
+                const zeroResult = this.createZeroScoreResult(
+                  sampleId,
+                  'Evaluation cancelled due to token limit exceeded'
+                );
+                processedBatchResults.push(zeroResult);
+                // Don't add tokens for zeroed samples
+              }
+            }
+            
+            // Add processed batch results
+            allResults.push(...processedBatchResults);
+            if (batchSummary) {
+              allSummaries.push(batchSummary);
+            }
+            
+            // Stop processing more batches
+            break;
+          } else {
+            // Batch fits within limit or we were already over - add results normally
+            allResults.push(...batchResults);
+            if (batchSummary) {
+              allSummaries.push(batchSummary);
+            }
+            
+            // Check if we've hit the token limit (shouldn't happen here, but check anyway)
+            if (totalTokensUsed >= maxTokensPerEval) {
+              logger.warn(
+                {
+                  totalTokensUsed,
+                  maxTokensPerEval,
+                  batchIndex: batchIndex + 1,
+                  totalBatches: batchPaths.length
+                },
+                'Token limit reached - stopping batch processing'
+              );
+              break; // Stop processing more batches
+            }
+          }
+        } catch (error: any) {
+          logger.error(
+            {
+              batchIndex: batchIndex + 1,
+              error: error instanceof Error ? error.message : String(error),
+              stdout: error?.stdout?.substring(0, 500),
+              stderr: error?.stderr?.substring(0, 500)
+            },
+            'Batch evaluation failed'
+          );
+          // Continue to next batch or stop if critical
+          throw error;
+        }
+      }
+      
+      // Pad remaining samples with zero scores
+      const evaluatedSamples = allResults.length;
+      const remainingSamples = totalSamples - evaluatedSamples;
+      
+      if (remainingSamples > 0) {
+        logger.info(
+          { evaluatedSamples, remainingSamples, totalSamples },
+          'Padding remaining samples with zero scores'
+        );
+        
+        // Read original dataset to get sample IDs for padding
+        const originalDatasetContent = await fs.readFile(originalDatasetPath!, 'utf-8');
+        const datasetLines = originalDatasetContent.split('\n').filter(line => line.trim());
+        
+        // Get IDs of evaluated samples
+        const evaluatedSampleIds = new Set<string>();
+        for (const result of allResults) {
+          if (typeof result === 'object' && result !== null) {
+            const resultObj = result as Record<string, unknown>;
+            const sample = resultObj.sample as { id?: string } | undefined;
+            if (sample?.id) {
+              evaluatedSampleIds.add(sample.id);
+            }
+          }
+        }
+        
+        // Create zero-score results for remaining samples
+        for (let i = 0; i < datasetLines.length; i++) {
+          try {
+            const sample = JSON.parse(datasetLines[i]);
+            if (sample.id && !evaluatedSampleIds.has(sample.id)) {
+              const zeroResult = this.createZeroScoreResult(
+                sample.id,
+                'Evaluation skipped due to token limit exceeded'
+              );
+              allResults.push(zeroResult);
+              
+              // Stop if we've padded all remaining samples
+              if (allResults.length >= totalSamples) {
+                break;
+              }
+            }
+          } catch (e) {
+            // Skip invalid JSON lines
+          }
+        }
+      }
+      
+      // Log summary of token limit processing for testing
+      if (useBatching) {
+        const scoreSummary = allResults.map((result: unknown, index: number) => {
+          if (typeof result !== 'object' || result === null) {
+            return { sample: index + 1, score: null, tokens: 0, status: 'invalid' };
+          }
+          
+          const resultObj = result as Record<string, unknown>;
+          const resultData = resultObj.result as Record<string, unknown> | undefined;
+          const sample = resultObj.sample as { id?: string } | undefined;
+          
+          if (!resultData) {
+            return { sample: index + 1, id: sample?.id, score: null, tokens: 0, status: 'no_result_data' };
+          }
+          
+          const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
+          const grades = resultData.grades as Record<string, { score?: number; rationale?: string }> | undefined;
+          const performance = resultData.performance as { total_tokens?: number } | undefined;
+          
+          const score = grade?.score ?? resultData.weighted_score ?? 0;
+          const tokens = performance?.total_tokens ?? 0;
+          
+          // Check if pro-rated
+          const isProrated = grade?.rationale?.includes('pro-rated') || 
+                            Object.values(grades || {}).some(g => g?.rationale?.includes('pro-rated'));
+          const isZeroed = grade?.rationale?.includes('cancelled') || 
+                          grade?.rationale?.includes('skipped');
+          
+          return {
+            sample: index + 1,
+            id: sample?.id,
+            score: typeof score === 'number' ? Math.round(score * 1000) / 1000 : null,
+            tokens,
+            status: isProrated ? 'prorated' : isZeroed ? 'zeroed' : 'full',
+            blacklist: grades?.blacklist?.score,
+            agent_design: grades?.agent_design?.score,
+            scout_rubric: grades?.scout_rubric_grader?.score,
+          };
+        });
+        
+        const validScores = scoreSummary.filter(s => s.score !== null && s.status !== 'zeroed');
+        const averageScore = validScores.length > 0
+          ? validScores.reduce((sum, s) => sum + (s.score || 0), 0) / validScores.length
+          : 0;
+        
+        logger.info(
+          {
+            totalTokensUsed,
+            maxTokensPerEval,
+            totalSamples,
+            evaluatedSamples: allResults.length,
+            scoreSummary,
+            averageScore: Math.round(averageScore * 1000) / 1000,
+            breakdown: {
+              full: scoreSummary.filter(s => s.status === 'full').length,
+              prorated: scoreSummary.filter(s => s.status === 'prorated').length,
+              zeroed: scoreSummary.filter(s => s.status === 'zeroed').length,
+            }
+          },
+          'Token limit processing summary'
+        );
+      }
+      
+      // Clean up temporary batch files
+      for (const filePath of batchFilesToCleanup) {
+        try {
+          await fs.unlink(filePath);
+        } catch (error) {
+          logger.debug({ error, filePath }, 'Failed to cleanup batch file (non-fatal)');
+        }
+      }
+      
+      // Now process the combined results (will continue below with existing processing logic)
+      // Set results and summary for processing
+      results = allResults;
+      
+      // Recalculate summary from combined results
+      if (allSummaries.length > 0 || results.length > 0) {
+        // We'll recalculate summary metrics below
+        summary = allSummaries[0] || {}; // Use first batch summary as template
+      }
+    }
+    
+    // Now run the evaluation using wrapper script (only if not using batching)
+    let stdout = '';
+    let stderr = '';
+    let commandFailed = false;
+    let gateFailed = false;
+    
+    if (!useBatching) {
     const cmd = `${pythonCmd} /app/python/run_with_graders.py run "${suiteFile}" --output "${outputDir}"`;
     logger.info({ cmd, cwd: suiteDir, outputDir }, 'Running letta-evals');
 
@@ -2000,6 +2635,14 @@ export class TaskProcessor {
       // Max steps for agent tool calls (limits number of steps per evaluation)
       if (process.env.MAX_STEPS) {
         env.MAX_STEPS = process.env.MAX_STEPS;
+      }
+      // Max tokens per evaluation (limits total tokens used across all test cases)
+      if (process.env.MAX_TOKENS_PER_EVAL) {
+        env.MAX_TOKENS_PER_EVAL = process.env.MAX_TOKENS_PER_EVAL;
+      }
+      // Max concurrent evaluations (default: 10, max: 20)
+      if (process.env.MAX_CONCURRENT_EVALS) {
+        env.MAX_CONCURRENT_EVALS = process.env.MAX_CONCURRENT_EVALS;
       }
       // Letta - only support hosted instances
       if (process.env.LETTA_BASE_URL) {
@@ -2116,8 +2759,15 @@ export class TaskProcessor {
           );
         }
       }
+    } catch (error: any) {
+      // If single evaluation fails, rethrow
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error({ error: errorMessage }, 'Single evaluation failed');
+      throw error;
+    }
+    }
 
-      const duration = (Date.now() - startTime) / 1000;
+    const duration = (Date.now() - startTime) / 1000;
 
       // Clean up agents created during evaluation
       if (this.lettaClient && agentsBeforeEvaluation.size >= 0) {
@@ -2242,11 +2892,10 @@ export class TaskProcessor {
       }
 
       // Load results - validate that evaluation actually produced output
+      // Only load from files if not using batching (batching already has results)
+      if (!useBatching) {
       const summaryPath = path.join(outputDir, 'summary.json');
       const resultsPath = path.join(outputDir, 'results.jsonl');
-
-      let summary: Record<string, unknown> | null = null;
-      const results: unknown[] = [];
 
       // Check if summary.json exists
       try {
@@ -2269,6 +2918,7 @@ export class TaskProcessor {
         }
       } catch (error) {
         logger.warn({ error, resultsPath }, 'Failed to read results.jsonl');
+        }
       }
 
       // Validate that we got at least some results
@@ -2679,7 +3329,6 @@ export class TaskProcessor {
           error: message,
           stdout: stdout || undefined,
           stderr: stderr || undefined,
-          cmd,
           cwd: suiteDir
         },
         'letta-evals execution failed'
