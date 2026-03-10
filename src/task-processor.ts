@@ -2101,7 +2101,7 @@ export class TaskProcessor {
       // Calculated mode: TOKENS_PER_TEST_CASE * totalSamples
       tokensPerTestCase = process.env.TOKENS_PER_TEST_CASE
         ? parseInt(process.env.TOKENS_PER_TEST_CASE, 10)
-        : 25000; // Default: 25,000 tokens per test case
+        : 30000; // Default: 30,000 tokens per test case
       
       if (totalSamples > 0) {
         calculatedMaxTokens = tokensPerTestCase * totalSamples;
