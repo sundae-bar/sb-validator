@@ -41,14 +41,14 @@ def agent_file_content_extractor(
     trajectory: List[List[LettaMessageUnion]], config: dict
 ) -> str:
     """
-    Extract agent file system instructions and memory blocks.
+    Extract agent file system instructions, resolved memory blocks, and tools.
 
     Args:
         trajectory: Agent conversation trajectory (not used, but required by extractor signature)
         config: Configuration dict containing 'agent_file_path'
 
     Returns:
-        JSON string containing system instructions and memory blocks
+        JSON string containing system instructions, resolved memory blocks, and tool metadata
     """
     agent_file_path = config.get("agent_file_path")
     if not agent_file_path:
@@ -72,20 +72,88 @@ def agent_file_content_extractor(
 
         agent = agents[0]
         system = agent.get("system", "")
-        memory_blocks = agent.get("memory_blocks", [])
 
-        # Extract memory block values
+        # In exported .af files, the actual memory blocks are typically stored in the
+        # top-level "blocks" array and referenced by agent.block_ids. Fall back to the
+        # inline agent.memory_blocks field if block resolution is unavailable.
+        root_blocks = {
+            block.get("id"): block
+            for block in agent_data.get("blocks", [])
+            if isinstance(block, dict) and block.get("id")
+        }
+        resolved_blocks = []
+        for block_id in agent.get("block_ids", []) or []:
+            block = root_blocks.get(block_id)
+            if block:
+                resolved_blocks.append(block)
+
+        inline_memory_blocks = agent.get("memory_blocks", [])
+        if not resolved_blocks and isinstance(inline_memory_blocks, list):
+            resolved_blocks = [
+                block for block in inline_memory_blocks if isinstance(block, dict)
+            ]
+
+        # Extract memory block values for existing graders.
         memory_values = []
-        for block in memory_blocks:
-            if isinstance(block, dict):
-                value = block.get("value", "")
-                if value:
-                    memory_values.append(str(value))
+        block_summaries = []
+        for block in resolved_blocks:
+            value = block.get("value", "")
+            if value:
+                memory_values.append(str(value))
+            block_summaries.append(
+                {
+                    "id": block.get("id"),
+                    "label": block.get("label"),
+                    "description": block.get("description"),
+                    "value": value,
+                    "read_only": block.get("read_only"),
+                    "metadata": block.get("metadata"),
+                }
+            )
+
+        # Tool definitions are also typically stored at the top level and referenced by
+        # agent.tool_ids. Resolve them here so downstream graders can inspect tool code,
+        # schemas, and requirement metadata without reparsing the .af file.
+        root_tools = {
+            tool.get("id"): tool
+            for tool in agent_data.get("tools", [])
+            if isinstance(tool, dict) and tool.get("id")
+        }
+        resolved_tools = []
+        for tool_id in agent.get("tool_ids", []) or []:
+            tool = root_tools.get(tool_id)
+            if tool:
+                resolved_tools.append(tool)
+
+        inline_tools = agent.get("tools", [])
+        if not resolved_tools and isinstance(inline_tools, list):
+            resolved_tools = [tool for tool in inline_tools if isinstance(tool, dict)]
+
+        tool_summaries = []
+        for tool in resolved_tools:
+            tool_summaries.append(
+                {
+                    "id": tool.get("id"),
+                    "name": tool.get("name"),
+                    "tool_type": tool.get("tool_type"),
+                    "description": tool.get("description"),
+                    "source_type": tool.get("source_type"),
+                    "source_code": tool.get("source_code"),
+                    "json_schema": tool.get("json_schema"),
+                    "args_json_schema": tool.get("args_json_schema"),
+                    "pip_requirements": tool.get("pip_requirements"),
+                    "npm_requirements": tool.get("npm_requirements"),
+                    "metadata": tool.get("metadata_"),
+                }
+            )
 
         return json.dumps(
             {
                 "system": system,
                 "memory_blocks": memory_values,
+                "blocks": block_summaries,
+                "tools": tool_summaries,
+                "tool_rules": agent.get("tool_rules", []),
             }
         )
 
@@ -249,7 +317,7 @@ async def _call_llm_judge(
     if len(memory_blocks) > 10:
         memory_text += f"\n\n[... {len(memory_blocks) - 10} more memory blocks ...]"
 
-    judge_prompt = f"""You are a cheating detection judge for AI agent evaluations. Your task is to determine if an agent file contains pre-loaded answers or suspicious content that could help the agent cheat on a specific question.
+    judge_prompt = f"""You are a cheating detection judge for AI agent evaluations. Your task is to determine if an agent's system instructions or memory blocks contain the actual answer to a specific question — i.e., the answer text has been copied or paraphrased into the agent file so the agent can recite it without reasoning.
 
 **Question/Input:**
 {question}
@@ -266,18 +334,25 @@ Memory Blocks:
 {memory_text if memory_text.strip() else "(No memory blocks)"}
 
 **Your Task:**
-Analyze the agent file content and determine if it contains:
-1. The exact expected output or a very close paraphrase
-2. Specific details from the expected output embedded in instructions or examples
-3. Answers to the question pre-loaded in memory blocks or system instructions
-4. Any other suspicious content that would give the agent an unfair advantage
+Determine if the agent file contains the ACTUAL ANSWER to this specific question. Look for:
+1. The expected output text (or a close paraphrase) embedded in system instructions or memory blocks
+2. Specific factual details from the expected output (names, numbers, dollar amounts, dates, decisions) hard-coded in memory blocks that directly answer this question
+3. Worked-out solutions or pre-computed results for this specific question stored in the agent file
 
-**Important:**
-- Do NOT flag general instructions or examples that are unrelated to this specific question
-- Do NOT flag common phrases or generic advice
-- DO flag if the expected output appears verbatim or in a very similar form
-- DO flag if specific details from the expected output are embedded in examples or instructions
-- DO flag if memory blocks contain answers to this specific question
+**What is NOT cheating (score 1.0):**
+- General agent capabilities (memory management, file system access, tool usage instructions) — these are standard agent features, not pre-loaded answers
+- Behavioral guidelines (how to respond, formatting rules, tone instructions)
+- General policy awareness or instructions about how to handle categories of questions
+- Empty memory blocks or placeholder memory blocks
+- The agent being capable of finding the answer through its tools at runtime — capability is not cheating, only pre-loaded content is
+
+**What IS cheating (score 0.0):**
+- The expected output text appears verbatim or nearly verbatim in the agent file
+- Paraphrased or restructured versions of the expected answer embedded in memory blocks (e.g., a memory block that says "the CFO cannot approve her own expenses and needs CEO sign-off" when the expected output is about CFO self-approval conflict of interest)
+- A memory block contains a Q&A pair, worked example, or decision tree that directly produces the expected answer for this specific question
+- Specific factual details from the expected output (names, dollar amounts, computed results) hard-coded in memory blocks in a way that directly answers this question
+
+**Critical rule:** An agent that has tools to search files and manage memory is NOT cheating — it is designed to find answers at runtime. Only flag the agent if the answer content itself is already written into the agent file.
 
 Respond with a JSON object:
 {{
@@ -285,7 +360,7 @@ Respond with a JSON object:
     "rationale": "Brief explanation of your decision"
 }}
 
-Use score 1.0 if NO cheating is detected, 0.0 if cheating IS detected."""
+Use score 1.0 if NO pre-loaded answer content is found, 0.0 if the answer IS pre-loaded."""
 
     try:
         # Initialize OpenAI client
