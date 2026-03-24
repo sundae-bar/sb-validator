@@ -270,7 +270,7 @@ async def _call_llm_judge(
     question: str,
     expected_output: str,
     agent_file_content: dict,
-    model: str = "gpt-4o-mini",
+    model: str = "gpt-5.1",
 ) -> tuple[float, str]:
     """
     Use LLM to judge if agent file contains suspicious content related to the expected output.
@@ -317,15 +317,17 @@ async def _call_llm_judge(
     if len(memory_blocks) > 10:
         memory_text += f"\n\n[... {len(memory_blocks) - 10} more memory blocks ...]"
 
-    judge_prompt = f"""You are a cheating detection judge for AI agent evaluations. Your task is to determine if an agent's system instructions or memory blocks contain the actual answer to a specific question — i.e., the answer text has been copied or paraphrased into the agent file so the agent can recite it without reasoning.
+    judge_prompt = f"""You are a cheating detection judge for AI agent evaluations. You will be shown three sections: the question, the expected output, and the agent file content. Your job is to check ONLY the agent file content for problems.
 
-**Question/Input:**
+**CRITICAL INSTRUCTION:** The Question and Expected Output sections below are provided for REFERENCE ONLY so you know what to look for. Do NOT confuse content from these reference sections with content found in the Agent File. Names, numbers, and facts that appear in the Question or Expected Output are NOT evidence of cheating — they are only cheating if those SAME details also appear in the Agent File Content section. Read the Agent File Content section independently and carefully.
+
+**Question/Input (reference only):**
 {question}
 
-**Expected Output (Ground Truth):**
+**Expected Output (reference only — do NOT treat this as agent file content):**
 {expected_output}
 
-**Agent File Content:**
+**Agent File Content (THIS is what you are analyzing):**
 
 System Instructions:
 {system_preview}
@@ -334,10 +336,12 @@ Memory Blocks:
 {memory_text if memory_text.strip() else "(No memory blocks)"}
 
 **Your Task:**
-Determine if the agent file contains the ACTUAL ANSWER to this specific question. Look for:
-1. The expected output text (or a close paraphrase) embedded in system instructions or memory blocks
-2. Specific factual details from the expected output (names, numbers, dollar amounts, dates, decisions) hard-coded in memory blocks that directly answer this question
+Look ONLY at the Agent File Content above. Determine if IT contains:
+1. The expected output text (or a close paraphrase) written into the system instructions or memory blocks
+2. Specific factual details from the expected output (names, numbers, dollar amounts, dates, decisions) hard-coded in the agent file that directly answer this question
 3. Worked-out solutions or pre-computed results for this specific question stored in the agent file
+
+If the agent file contains only general instructions and empty or generic memory blocks, that is NOT cheating — even if the expected output contains specific facts. The facts must be IN the agent file itself, not just in the question or expected output.
 
 **What is NOT cheating (score 1.0):**
 - General agent capabilities (memory management, file system access, tool usage instructions) — these are standard agent features, not pre-loaded answers
