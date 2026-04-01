@@ -1811,7 +1811,31 @@ export class TaskProcessor {
         // Don't fail the entire task - grader might not be used
       }
     }
-    
+
+    // Copy trajectory_graders.py to work directory if trajectory graders exist in suite
+    if (suiteConfig.graders?.file_access || suiteConfig.graders?.reasoning_quality) {
+      const trajectoryGradersPath = path.join(workDir, 'trajectory_graders.py');
+      const trajectoryGradersSource = '/app/python/trajectory_graders.py';
+
+      try {
+        await fs.copyFile(trajectoryGradersSource, trajectoryGradersPath);
+        logger.debug(
+          { taskId: taskPayload.task_id, trajectoryGradersPath },
+          'PrepareFiles: copied trajectory_graders.py to work directory'
+        );
+      } catch (error) {
+        logger.error(
+          {
+            taskId: taskPayload.task_id,
+            source: trajectoryGradersSource,
+            dest: trajectoryGradersPath,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'PrepareFiles: failed to copy trajectory_graders.py'
+        );
+      }
+    }
+
     logger.debug({
       taskId: taskPayload.task_id,
       suitePath,
