@@ -9,7 +9,9 @@
     "dev": "ts-node src/index.ts",
     "test": "echo \"Error: no test specified\" && exit 1",
     "docker:build": "docker buildx build --platform linux/amd64,linux/arm64 -t sundaebarai/sn121-validator:latest -t sundaebarai/sn121-validator:$(node -p \"require('./package.json').version\") .",
-    "docker:push": "docker buildx build --platform linux/amd64,linux/arm64 -t sundaebarai/sn121-validator:latest -t sundaebarai/sn121-validator:$(node -p \"require('./package.json').version\") --push ."
+    "docker:push": "docker buildx build --platform linux/amd64,linux/arm64 -t sundaebarai/sn121-validator:latest -t sundaebarai/sn121-validator:$(node -p \"require('./package.json').version\") --push .",
+    "tag:latest": "git tag v$(node -p \"require('./package.json').version\")",
+    "tag:latest:push": "npm run tag:latest && git push origin v$(node -p \"require('./package.json').version\")"
   },
   "keywords": ["validator", "bittensor", "letta", "evaluation"],
   "author": "",
