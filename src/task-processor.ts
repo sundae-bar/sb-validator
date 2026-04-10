@@ -891,6 +891,32 @@ export class TaskProcessor {
   }
 
   /**
+   * If CHUTES_API_KEY is set and the agent is using DeepSeek via OpenRouter,
+   * override the llm_config to use Chutes instead.
+   */
+  private maybeOverrideDeepSeekWithChutes(agentContent: string, taskId: string): string {
+    if (!process.env.CHUTES_API_KEY) return agentContent;
+
+    const agentData = JSON.parse(agentContent);
+    const agent = agentData?.agents?.[0];
+    const llmConfig = agent?.llm_config;
+    if (!llmConfig) return agentContent;
+
+    const isOpenRouterDeepSeek =
+      (llmConfig.model_endpoint?.includes('openrouter.ai') || llmConfig.provider_name === 'openrouter') &&
+      llmConfig.model?.toLowerCase().includes('deepseek');
+
+    if (!isOpenRouterDeepSeek) return agentContent;
+
+    llmConfig.model = 'deepseek-ai/DeepSeek-V3.1-TEE';
+    llmConfig.model_endpoint = 'https://llm.chutes.ai/v1';
+    llmConfig.provider_name = 'chutes';
+
+    logger.info({ taskId }, 'Overriding DeepSeek/OpenRouter with Chutes (CHUTES_API_KEY is set)');
+    return JSON.stringify(agentData, null, 2);
+  }
+
+  /**
    * Validate dataset file has 'input' field
    */
   private async validateDataset(datasetPath: string): Promise<void> {
@@ -1520,6 +1546,16 @@ export class TaskProcessor {
         );
       }
       
+      // Override DeepSeek/OpenRouter with Chutes if CHUTES_API_KEY is available
+      try {
+        agentContent = this.maybeOverrideDeepSeekWithChutes(agentContent, taskPayload.task_id);
+      } catch (error) {
+        logger.warn(
+          { error: error instanceof Error ? error.message : String(error), taskId: taskPayload.task_id },
+          'Failed to override DeepSeek with Chutes'
+        );
+      }
+
       agentFilePath = path.join(workDir, agentFileName);
       await fs.writeFile(agentFilePath, agentContent, 'utf-8');
       
@@ -2274,6 +2310,7 @@ export class TaskProcessor {
           if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
           if (process.env.GOOGLE_API_KEY) env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
           if (process.env.OPENROUTER_API_KEY) env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+          if (process.env.CHUTES_API_KEY) env.CHUTES_API_KEY = process.env.CHUTES_API_KEY;
           if (process.env.TOGETHER_API_KEY) env.TOGETHER_API_KEY = process.env.TOGETHER_API_KEY;
           if (process.env.TOGETHERAI_API_KEY) env.TOGETHERAI_API_KEY = process.env.TOGETHERAI_API_KEY;
           if (process.env.GITHUB_TOKEN) env.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
@@ -2709,6 +2746,9 @@ export class TaskProcessor {
       }
       if (process.env.OPENROUTER_API_KEY) {
         env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+      }
+      if (process.env.CHUTES_API_KEY) {
+        env.CHUTES_API_KEY = process.env.CHUTES_API_KEY;
       }
       if (process.env.TOGETHER_API_KEY) {
         env.TOGETHER_API_KEY = process.env.TOGETHER_API_KEY;

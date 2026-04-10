@@ -1,6 +1,6 @@
 {
   "name": "sundae-bar-validator",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "Secure validator client for sundae_bar SN121 subnet",
   "main": "dist/index.js",
   "scripts": {
