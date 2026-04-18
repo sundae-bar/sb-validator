@@ -139,7 +139,10 @@ The `.env` file is shared between all services. Key variables:
 - `LETTA_PG_USER`, `LETTA_PG_PASSWORD`, `LETTA_PG_DB` (database config, defaults provided)
 
 **For Validator:**
-- `VALIDATOR_MNEMONIC`: Required – your Bittensor validator hotkey mnemonic
+- One of the following key options (required):
+  - `VALIDATOR_MNEMONIC`: 12-word BIP39 mnemonic
+  - `HOTKEY_PATH`: Path to a Bittensor hotkey JSON file (mount via Docker volume)
+  - `PRIVATE_KEY`: Raw private key / hex seed (`0x...`)
 - `API_URL`: Required – coordinator API endpoint
 - `LETTA_BASE_URL`: Automatically set to `http://letta-server:8283` in `docker-compose.yaml` (no need to configure)
 - Model provider API keys (for graders, same as Letta)
@@ -158,7 +161,7 @@ The Letta image (`sundaebarai/letta:latest`) is pulled from Docker Hub and doesn
 
 #### 1. Configure Environment
 
-You'll need your **existing Bittensor validator hotkey mnemonic**. This is the same mnemonic you use for your Bittensor validator on subnet 121.
+You'll need your **existing Bittensor validator key**. Three formats are supported.
 
 Copy `.env.example` to `.env`:
 
@@ -166,8 +169,12 @@ Copy `.env.example` to `.env`:
 cp .env.example .env
 ```
 
-Edit `.env` and set:
-- `VALIDATOR_MNEMONIC`: Your **Bittensor validator hotkey mnemonic** (the same 12-word phrase you use for subnet 121)
+Edit `.env` and set **one** of the following key options:
+- `VALIDATOR_MNEMONIC`: Your 12-word BIP39 mnemonic (most common)
+- `HOTKEY_PATH`: Path to a Bittensor hotkey JSON file (e.g. `~/.bittensor/wallets/<wallet>/hotkeys/<hotkey>`) — reads `secretPhrase` from the file
+- `PRIVATE_KEY`: Raw private key / hex seed (`0x...`)
+
+Also set:
 - `API_URL`: Coordinator API URL (e.g., `https://api.sundaebar.ai/api/v2/validators`)
 - `LETTA_BASE_URL`: URL of your running Letta server (e.g., `http://localhost:8283` or `http://letta-server:8283`)
 
@@ -246,7 +253,9 @@ docker run --rm \
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VALIDATOR_MNEMONIC` | Yes | - | Bittensor validator hotkey mnemonic (12-word phrase). Also used for signing Bittensor weight transactions. |
+| `VALIDATOR_MNEMONIC` | One of three required | - | 12-word BIP39 mnemonic. Used for validator identity and signing Bittensor weight transactions. |
+| `HOTKEY_PATH` | One of three required | - | Path to a Bittensor hotkey JSON file (reads `secretPhrase`). Mount via Docker volume when running in a container. |
+| `PRIVATE_KEY` | One of three required | - | Raw private key / hex seed (`0x...`). |
 | `API_URL` | Yes | - | Coordinator API URL. Can be base URL (e.g., `http://localhost:3002`) or full path (e.g., `http://localhost:3002/api/v2/validators`) |
 | `DISPLAY_NAME` | No | - | Validator display name |
 | `VERSION` | No | `1.0.1` | Validator version |
