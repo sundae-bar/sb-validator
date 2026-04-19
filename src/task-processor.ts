@@ -120,6 +120,10 @@ export class TaskProcessor {
     this.markProcessing(taskId);
     logger.debug({ taskId }, 'Marked task as processing (in-memory)');
 
+    // SBC9: hoisted so the finally block can clean up regardless of where an error occurs
+    let skillId: string | undefined;
+    let importedAgentId: string | undefined;
+
     try {
       // Step 1: Claim task (idempotent - if already claimed, will fail gracefully)
       let claimed = false;
@@ -153,10 +157,14 @@ export class TaskProcessor {
         agentFilePath?: string;
         datasetPath?: string;
         rubricPath?: string;
+        skillId?: string;
+        importedAgentId?: string;
       };
 
       try {
         files = await this.prepareFiles(taskPayload, taskWorkDir);
+        skillId = files.skillId;
+        importedAgentId = files.importedAgentId;
       } catch (error) {
         logger.error(
           { taskId, error: error instanceof Error ? error.message : String(error) },
@@ -444,6 +452,30 @@ export class TaskProcessor {
         }
       } else {
         logger.info({ taskId, workDir: path.join(this.workDir, taskId) }, 'KEEP_TASK_FILES=1 set, skipping cleanup of task workDir');
+      }
+
+      // SBC9: clean up skill and imported agent (letta-evals won't clean up agent_id targets)
+      if (skillId && this.lettaClient) {
+        try {
+          await this.lettaClient.deleteSkill(skillId);
+          logger.debug({ taskId, skillId }, 'Cleaned up SBC9 skill');
+        } catch (err) {
+          logger.warn(
+            { taskId, skillId, error: err instanceof Error ? err.message : String(err) },
+            'Failed to delete SBC9 skill (non-fatal)',
+          );
+        }
+      }
+      if (importedAgentId && this.lettaClient) {
+        try {
+          await this.lettaClient.deleteAgent(importedAgentId);
+          logger.debug({ taskId, importedAgentId }, 'Cleaned up SBC9 imported agent');
+        } catch (err) {
+          logger.warn(
+            { taskId, importedAgentId, error: err instanceof Error ? err.message : String(err) },
+            'Failed to delete SBC9 imported agent (non-fatal)',
+          );
+        }
       }
 
       // Unmark processing (in-memory)
@@ -979,10 +1011,16 @@ export class TaskProcessor {
     agentFilePath?: string;
     datasetPath?: string;
     rubricPath?: string;
+    skillId?: string;
+    importedAgentId?: string;
   }> {
     if (!workDir.startsWith(this.workDir)) {
       throw new Error(`Invalid workDir: ${workDir} is not within base workDir: ${this.workDir}`);
     }
+
+    // SBC9 skill vars — only set when skill_file_path is present
+    let skillId: string | undefined;
+    let importedAgentId: string | undefined;
 
     // Download and write agent file
     logger.info({ taskId: taskPayload.task_id, workDir }, 'PrepareFiles: start');
@@ -1574,6 +1612,39 @@ export class TaskProcessor {
       }, 'PrepareFiles: downloaded agent file (preview)');
     }
 
+    // SBC9: import base agent, create skill, and attach — only when skill_file_path is present
+    if (taskPayload.skill_file_path && this.lettaClient && agentFilePath) {
+      // Download skill.md
+      const skillContent = await this.downloadFileWithBackup(
+        taskPayload.skill_file_path,
+        taskPayload.skill_backup_file_path,
+      );
+      await fs.writeFile(path.join(workDir, 'skill.md'), skillContent, 'utf-8');
+      logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: downloaded skill.md');
+
+      // Parse YAML frontmatter for name/description
+      let skillName = 'Unnamed Skill';
+      let skillDescription = '';
+      const fmMatch = skillContent.match(/^---\n([\s\S]*?)\n---/);
+      if (fmMatch) {
+        try {
+          const fm = yaml.load(fmMatch[1]) as any;
+          if (fm?.name) skillName = String(fm.name);
+          if (fm?.description) skillDescription = String(fm.description);
+        } catch { /* use defaults */ }
+      }
+
+      // Import base agent → agent_id
+      importedAgentId = await this.lettaClient.importAgent(agentFilePath);
+      logger.debug({ taskId: taskPayload.task_id, importedAgentId }, 'PrepareFiles: imported base agent');
+
+      // Create skill and attach to agent
+      skillId = await this.lettaClient.createSkill(skillName, skillDescription, skillContent);
+      logger.debug({ taskId: taskPayload.task_id, skillId }, 'PrepareFiles: created skill');
+      await this.lettaClient.attachSkillToAgent(importedAgentId, skillId);
+      logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: attached skill to agent');
+    }
+
     // Download and write dataset
     let datasetPath: string | undefined;
     const dataset = taskPayload.dataset_file_path;
@@ -1617,6 +1688,21 @@ export class TaskProcessor {
       } else {
         // External file path
         datasetPath = dataset;
+      }
+    }
+
+    // SBC9: sample 2 variants per scenario type (8 total), seeded by task_id
+    // No-op if dataset is not SBC9-shaped. Only runs for skill submissions.
+    if (datasetPath && taskPayload.skill_file_path) {
+      try {
+        const { stdout, stderr } = await execAsync(
+          `python3 /app/python/sample_variants.py "${datasetPath}" "${taskPayload.task_id}"`,
+        );
+        if (stdout?.trim()) logger.debug({ taskId: taskPayload.task_id }, `sample_variants: ${stdout.trim()}`);
+        if (stderr?.trim()) logger.warn({ taskId: taskPayload.task_id }, `sample_variants stderr: ${stderr.trim()}`);
+        logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: sampled SBC9 variants');
+      } catch (error) {
+        logger.warn({ taskId: taskPayload.task_id, error }, 'PrepareFiles: sample_variants.py failed (non-fatal, using full dataset)');
       }
     }
 
@@ -1728,7 +1814,15 @@ export class TaskProcessor {
       const agentBasename = path.basename(agentFilePath);
       suiteConfig.target.agent_file = agentBasename;
     }
-    
+
+    // SBC9: use pre-imported agent_id so letta-evals picks up the attached skill
+    // Without this, letta-evals would re-import a fresh agent that has no skill attached
+    if (importedAgentId && suiteConfig.target) {
+      suiteConfig.target.agent_id = importedAgentId;
+      delete suiteConfig.target.agent_file;
+      logger.debug({ taskId: taskPayload.task_id, importedAgentId }, 'PrepareFiles: overriding suite target with agent_id');
+    }
+
     // Update agent_design and blacklist grader's agent_file_path if they exist in suite.yaml
     // The graders should already be configured in suite.yaml, we just update the path
     const agentFileFullPath = agentFilePath 
@@ -1872,6 +1966,22 @@ export class TaskProcessor {
       }
     }
 
+    // SBC9: copy skill_evaluation.py + dataset_sbc9.jsonl if skill graders present
+    if (suiteConfig.graders?.skill_integrity || suiteConfig.graders?.skill_use || suiteConfig.graders?.scenario_quality) {
+      try {
+        await fs.copyFile('/app/python/skill_evaluation.py', path.join(workDir, 'skill_evaluation.py'));
+        logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: copied skill_evaluation.py');
+      } catch (error) {
+        logger.error({ taskId: taskPayload.task_id, error: error instanceof Error ? error.message : String(error) }, 'PrepareFiles: failed to copy skill_evaluation.py');
+      }
+      try {
+        await fs.copyFile('/app/python/dataset_sbc9.jsonl', path.join(workDir, 'dataset_sbc9.jsonl'));
+        logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: copied dataset_sbc9.jsonl');
+      } catch (error) {
+        logger.warn({ taskId: taskPayload.task_id, error: error instanceof Error ? error.message : String(error) }, 'PrepareFiles: failed to copy dataset_sbc9.jsonl (non-fatal)');
+      }
+    }
+
     logger.debug({
       taskId: taskPayload.task_id,
       suitePath,
@@ -1884,7 +1994,9 @@ export class TaskProcessor {
       suitePath,
       agentFilePath,
       datasetPath,
-      rubricPath
+      rubricPath,
+      skillId,
+      importedAgentId,
     };
   }
 
@@ -3255,17 +3367,35 @@ export class TaskProcessor {
         
         totalTokens += gradingTokens;
         
-        // Calculate score: scout_rubric_grader if both gates pass, otherwise 0
+        // Calculate score: weighted average of non-gate graders if both gates pass, otherwise 0
         let finalScore: number | undefined = undefined;
         if (grades && Object.keys(grades).length > 0) {
           const blacklistScore = grades.blacklist?.score;
           const agentDesignScore = grades.agent_design?.score;
-          const rubricScore = grades.scout_rubric_grader?.score;
-          
+
           // Both gates must pass (score === 1.0) for rubric score to count
           const blacklistPassed = blacklistScore === 1.0 || blacklistScore === undefined;
           const agentDesignPassed = agentDesignScore === 1.0 || agentDesignScore === undefined;
-          
+
+          // Compute weighted rubric score from all non-gate graders (weight > 0)
+          // Falls back to scout_rubric_grader for backwards compat with challenges that don't use graderWeights
+          let rubricScore: number | undefined = undefined;
+          let weightedSum = 0;
+          let totalWeight = 0;
+          for (const [name, grade] of Object.entries(grades)) {
+            const w = graderWeights[name] ?? 0;
+            if (w > 0 && typeof (grade as any).score === 'number') {
+              weightedSum += (grade as any).score * w;
+              totalWeight += w;
+            }
+          }
+          if (totalWeight > 0) {
+            rubricScore = weightedSum / totalWeight;
+          } else {
+            // Fallback: no graderWeights configured, use scout_rubric_grader directly
+            rubricScore = grades.scout_rubric_grader?.score;
+          }
+
           if (blacklistPassed && agentDesignPassed && rubricScore !== undefined && rubricScore !== null) {
             finalScore = roundScore(rubricScore);
           } else {
@@ -3297,12 +3427,26 @@ export class TaskProcessor {
           const agentDesignPassed = agentDesignScore === 1.0 || agentDesignScore === undefined;
           const gatesPassed = blacklistPassed && agentDesignPassed;
           
-          const rubricRationale = grades.scout_rubric_grader?.rationale as string | undefined;
+          // Collect rationale from all non-gate graders (weight > 0), or fall back to scout_rubric_grader
+          let rubricRationale: string | undefined = undefined;
+          const nonGateRationales: string[] = [];
+          for (const [name, grade] of Object.entries(grades)) {
+            const w = graderWeights[name] ?? 0;
+            if (w > 0) {
+              const r = (grade as any).rationale as string | undefined;
+              if (r) nonGateRationales.push(nonGateRationales.length > 0 || Object.keys(graderWeights).length > 1 ? `${name}: ${r}` : r);
+            }
+          }
+          if (nonGateRationales.length > 0) {
+            rubricRationale = nonGateRationales.join('\n');
+          } else {
+            rubricRationale = grades.scout_rubric_grader?.rationale as string | undefined;
+          }
           const blacklistRationale = grades.blacklist?.rationale as string | undefined;
           const agentDesignRationale = grades.agent_design?.rationale as string | undefined;
-          
+
           let combinedRationale: string | undefined = undefined;
-          
+
           if (gatesPassed) {
             // Gates passed: only show rubric rationale
             combinedRationale = rubricRationale;

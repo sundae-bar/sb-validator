@@ -155,6 +155,73 @@ export class LettaClient {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // SBC9 Skill Methods
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Import an agent from a local .af file and return its agent_id.
+   */
+  async importAgent(filePath: string): Promise<string> {
+    logger.debug({ filePath }, 'Importing Letta agent from file');
+    const fileBuffer = await fs.readFile(filePath);
+    const form = new FormData();
+    form.append('file', fileBuffer, {
+      filename: path.basename(filePath),
+      contentType: 'application/octet-stream',
+    });
+    form.append('append_copy_suffix', 'false');
+    form.append('override_existing_tools', 'false');
+    const response = await this.client.post('/v1/agents/import', form, {
+      headers: form.getHeaders(),
+      maxBodyLength: Infinity,
+    });
+    const agentId = response.data?.agent_ids?.[0];
+    if (!agentId) throw new Error('importAgent: no agent_id returned in response');
+    logger.debug({ agentId }, 'Agent imported successfully');
+    return agentId;
+  }
+
+  /**
+   * Create a Skill and return its skill_id.
+   */
+  async createSkill(name: string, description: string, content: string): Promise<string> {
+    logger.debug({ name }, 'Creating Letta skill');
+    const response = await this.client.post('/v1/skills/', { name, description, content });
+    const skillId = response.data?.id;
+    if (!skillId) throw new Error('createSkill: no id returned in response');
+    logger.debug({ skillId, name }, 'Skill created successfully');
+    return skillId;
+  }
+
+  /**
+   * Attach an existing skill to an agent.
+   */
+  async attachSkillToAgent(agentId: string, skillId: string): Promise<void> {
+    logger.debug({ agentId, skillId }, 'Attaching skill to agent');
+    await this.client.patch(`/v1/agents/${agentId}/skills/attach/${skillId}`);
+    logger.debug({ agentId, skillId }, 'Skill attached successfully');
+  }
+
+  /**
+   * Delete a skill by ID.
+   */
+  async deleteSkill(skillId: string): Promise<void> {
+    logger.debug({ skillId }, 'Deleting Letta skill');
+    try {
+      await this.client.delete(`/v1/skills/${skillId}`);
+      logger.debug({ skillId }, 'Skill deleted successfully');
+    } catch (error) {
+      logger.error(
+        { error: error instanceof Error ? error.message : String(error), skillId },
+        'Failed to delete skill',
+      );
+      throw error;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+
   /**
    * List folders, optionally filtered by name
    * Uses simple request (no pagination) since pagination is not working reliably

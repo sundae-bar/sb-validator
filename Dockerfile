@@ -30,11 +30,16 @@ RUN pip3 install --no-cache-dir --break-system-packages -r requirements.lock
 COPY python/run_with_graders.py /app/python/run_with_graders.py
 COPY python/agent_design.py /app/python/agent_design.py
 COPY python/trajectory_graders.py /app/python/trajectory_graders.py
+COPY python/skill_evaluation.py /app/python/skill_evaluation.py
+COPY python/sample_variants.py /app/python/sample_variants.py
+COPY python/dataset_sbc9.jsonl /app/python/dataset_sbc9.jsonl
 
 # Set permissions
 RUN chmod +x /app/python/run_with_graders.py
 RUN chmod +x /app/python/agent_design.py
 RUN chmod +x /app/python/trajectory_graders.py
+RUN chmod +x /app/python/skill_evaluation.py
+RUN chmod +x /app/python/sample_variants.py
 
 # Set PYTHONPATH
 ENV PYTHONPATH=/app/python:$PYTHONPATH
