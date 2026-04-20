@@ -1643,6 +1643,8 @@ export class TaskProcessor {
       logger.debug({ taskId: taskPayload.task_id, skillId }, 'PrepareFiles: created skill');
       await this.lettaClient.attachSkillToAgent(importedAgentId, skillId);
       logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: attached skill to agent');
+      await this.lettaClient.attachToolToAgent(importedAgentId, 'load_skill');
+      logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: attached load_skill tool to agent');
     }
 
     // Download and write dataset

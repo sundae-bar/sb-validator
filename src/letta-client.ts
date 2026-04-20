@@ -204,6 +204,19 @@ export class LettaClient {
   }
 
   /**
+   * Attach a tool to an agent by tool name. Looks up the tool_id first.
+   */
+  async attachToolToAgent(agentId: string, toolName: string): Promise<void> {
+    logger.debug({ agentId, toolName }, 'Attaching tool to agent by name');
+    const response = await this.client.get('/v1/tools/', { params: { name: toolName } });
+    const tools = response.data;
+    const tool = Array.isArray(tools) ? tools[0] : null;
+    if (!tool?.id) throw new Error(`attachToolToAgent: tool '${toolName}' not found`);
+    await this.client.patch(`/v1/agents/${agentId}/tools/attach/${tool.id}`);
+    logger.debug({ agentId, toolName, toolId: tool.id }, 'Tool attached to agent');
+  }
+
+  /**
    * Delete a skill by ID.
    */
   async deleteSkill(skillId: string): Promise<void> {
