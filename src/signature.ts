@@ -28,17 +28,20 @@ export async function createKeyPair(mnemonic: string): Promise<KeyringPair> {
   await initializeCrypto();
   
   if (!mnemonic || mnemonic.trim().length === 0) {
-    throw new Error('Mnemonic is required and cannot be empty');
+    throw new Error('Mnemonic or private key is required and cannot be empty');
   }
 
   try {
     const keyring = new Keyring({ type: 'sr25519' });
-    const pair = keyring.addFromMnemonic(mnemonic.trim());
+    const trimmed = mnemonic.trim();
+    const pair = trimmed.startsWith('0x')
+      ? keyring.addFromUri(trimmed)       // raw hex seed / private key
+      : keyring.addFromMnemonic(trimmed); // BIP39 mnemonic
     return pair;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    logger.error({ error: errorMessage }, 'Failed to create key pair from mnemonic');
-    
+    logger.error({ error: errorMessage }, 'Failed to create key pair from mnemonic or private key');
+
     // Provide helpful error message
     if (errorMessage.includes('Invalid bip39 mnemonic')) {
       throw new Error(
@@ -46,8 +49,8 @@ export async function createKeyPair(mnemonic: string): Promise<KeyringPair> {
         `Please use your valid Bittensor validator hotkey mnemonic (12-word BIP39 phrase).`
       );
     }
-    
-    throw new Error(`Invalid mnemonic: ${errorMessage}`);
+
+    throw new Error(`Invalid mnemonic or private key: ${errorMessage}`);
   }
 }
 

@@ -59,6 +59,8 @@ services:
       - LETTA_BASE_URL=http://letta-server:8283
     env_file:
       - .env
+    volumes:
+      - ${HOME}/.bittensor/wallets:/home/validator/.bittensor/wallets:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8283/v1/health || exit 1"]

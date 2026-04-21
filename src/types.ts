@@ -26,6 +26,9 @@ export interface Task {
     dataset_file_path?: string; // URL, base64 encoded dataset file, or base64: prefixed string
     suite_file_path: string; // URL, base64 encoded suite.yaml file, or base64: prefixed string (required)
     rubric_file_path?: string; // URL, base64 encoded, or base64: prefixed string
+    skill_file_path?: string; // URL to SKILL.md; if present → SBC9 skill submission
+    skill_backup_file_path?: string; // Backup URL for SKILL.md
+    agent_backup_file_path?: string; // Backup URL for agent file
     priority?: number;
     metadata?: Record<string, unknown>;
     // Legacy: suite_config is deprecated, use suite_file_path instead

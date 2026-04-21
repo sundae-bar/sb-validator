@@ -205,12 +205,8 @@ export class Validator {
             return;
           }
 
-          // Support both VALIDATOR_MNEMONIC (new) and BITTENSOR_VALIDATOR_SECRET (legacy) for backwards compatibility
-          const validatorSecret = (
-            process.env.VALIDATOR_MNEMONIC || 
-            process.env.BITTENSOR_VALIDATOR_SECRET || 
-            ''
-          ).trim();
+          // Use the already-resolved mnemonic/key from config (covers VALIDATOR_MNEMONIC, HOTKEY_PATH, PRIVATE_KEY)
+          const validatorSecret = this.config.mnemonic;
           logger.debug(
             {
               hasValidatorSecret: !!validatorSecret,
@@ -222,11 +218,8 @@ export class Validator {
 
           if (!validatorSecret) {
             logger.warn(
-              {
-                envVar: 'VALIDATOR_MNEMONIC',
-                weightsCount: weights.weights.length,
-              },
-              'VALIDATOR_MNEMONIC is not set; skipping on-chain bittensor setWeights submission',
+              { weightsCount: weights.weights.length },
+              'No key configured; skipping on-chain bittensor setWeights submission',
             );
             return;
           }

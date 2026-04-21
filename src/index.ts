@@ -5,6 +5,7 @@
  */
 
 import 'dotenv/config';
+import * as fs from 'fs';
 import { Validator } from './validator';
 import logger from './logger';
 import { createServer, startServer } from './server';
@@ -21,14 +22,36 @@ function dequote(value: string): string {
 // Load configuration from environment variables
 function loadConfig(): ValidatorConfig {
   // Support both VALIDATOR_MNEMONIC (new) and MNEMONIC (legacy) for backwards compatibility
-  const mnemonic = dequote(process.env.VALIDATOR_MNEMONIC || process.env.MNEMONIC || '');
+  let mnemonic = dequote(process.env.VALIDATOR_MNEMONIC || process.env.MNEMONIC || '');
   const apiUrl = dequote(process.env.API_URL || 'http://localhost:3002');
+
+  // Fallback: read secretPhrase from a Bittensor hotkey JSON file
+  if (!mnemonic && process.env.HOTKEY_PATH) {
+    try {
+      const hotkey = JSON.parse(fs.readFileSync(process.env.HOTKEY_PATH, 'utf8'));
+      mnemonic = hotkey.secretPhrase || '';
+      if (!mnemonic) {
+        throw new Error(`HOTKEY_PATH file has no secretPhrase field: ${process.env.HOTKEY_PATH}`);
+      }
+      logger.info({ path: process.env.HOTKEY_PATH }, 'Loaded mnemonic from HOTKEY_PATH');
+    } catch (error) {
+      throw new Error(
+        `Failed to read HOTKEY_PATH (${process.env.HOTKEY_PATH}): ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  // Fallback: raw private key / hex seed
+  if (!mnemonic && process.env.PRIVATE_KEY) {
+    mnemonic = dequote(process.env.PRIVATE_KEY);
+  }
 
   if (!mnemonic) {
     throw new Error(
-      'VALIDATOR_MNEMONIC environment variable is required.\n' +
-      'Set your Bittensor validator hotkey mnemonic in your .env file or environment.\n' +
-      '(Note: MNEMONIC is deprecated, use VALIDATOR_MNEMONIC instead)'
+      'No key configured. Set one of:\n' +
+      '  VALIDATOR_MNEMONIC — 12-word BIP39 mnemonic\n' +
+      '  HOTKEY_PATH        — path to Bittensor hotkey JSON file\n' +
+      '  PRIVATE_KEY        — raw private key / hex seed (0x...)'
     );
   }
 
