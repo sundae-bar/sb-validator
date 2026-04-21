@@ -480,6 +480,20 @@ Respond with JSON only:
 @grader
 async def evaluate_skill_use(sample: Sample, submission: str) -> GradeResult:
     """LLM judge: did the agent's output follow the SKILL.md's procedures?"""
+    # Short-circuit: if the skill itself failed integrity, adherence scoring is meaningless.
+    # A gaming skill with memorized answers will always produce "adherent" outputs — that's
+    # the attack pattern. Suppress skill_use to 0 so gaming submissions can't earn points here.
+    integrity = await check_skill_integrity(sample, submission)
+    if integrity.score < 1.0:
+        return GradeResult(
+            score=0.0,
+            rationale=(
+                "SUPPRESSED — skill failed integrity check, adherence score not awarded. "
+                f"Integrity flag: {integrity.rationale[:200]}"
+            ),
+            metadata={"suppressed_due_to_integrity": True},
+        )
+
     try:
         data = json.loads(submission)
     except json.JSONDecodeError:
