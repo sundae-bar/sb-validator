@@ -67,7 +67,8 @@ export class Validator {
       this.taskProcessor = new TaskProcessor(
         this.apiClient,
         workDir,
-        maxConcurrentTasks
+        maxConcurrentTasks,
+        pair
       );
 
       // Register evaluator

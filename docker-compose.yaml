@@ -47,16 +47,38 @@ services:
       retries: 3
       start_period: 60s
 
+  sbevals:
+    image: sundaebarai/sb-evals:latest
+    container_name: sn121-sbevals
+    ports:
+      - "8090:8090"
+    environment:
+      - NODE_ENV=production
+      - SERVER_PORT=8090
+      - EVAL_SERVICE_API_KEY=${SBEVALS_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8090/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   validator:
     image: sundaebarai/sn121-validator:latest
     container_name: sn121-validator
     depends_on:
       letta-server:
         condition: service_healthy
+      sbevals:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
       - LETTA_BASE_URL=http://letta-server:8283
+      - SBEVALS_URL=http://sbevals:8090
     env_file:
       - .env
     volumes:
@@ -82,6 +104,7 @@ services:
     command:
       - sn121-validator
       - sn121-letta
+      - sn121-sbevals
 
 volumes:
   letta-data:

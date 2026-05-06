@@ -20,6 +20,8 @@ import logger from './logger';
 import { ApiClient } from './api-client';
 import type { Task } from './types';
 import { LettaClient, type FileMetadata } from './letta-client';
+import type { KeyringPair } from '@polkadot/keyring/types';
+import { submitSkillTask, pollSkillResult } from './sbevals-client';
 
 const execAsync = promisify(exec);
 
@@ -30,6 +32,7 @@ interface ProcessingTask {
 
 export class TaskProcessor {
   private apiClient: ApiClient;
+  private pair: KeyringPair | null = null;
   private workDir: string;
   private processingTasks: Map<string, ProcessingTask> = new Map(); // In-memory tracking
   private maxConcurrentTasks: number;
@@ -39,9 +42,11 @@ export class TaskProcessor {
   constructor(
     apiClient: ApiClient,
     workDir: string = '/tmp/validator-work',
-    maxConcurrentTasks: number = 1
+    maxConcurrentTasks: number = 1,
+    pair?: KeyringPair
   ) {
     this.apiClient = apiClient;
+    this.pair = pair ?? null;
     this.workDir = workDir;
     this.maxConcurrentTasks = maxConcurrentTasks;
     const intervalMinutes = Number(process.env.BITTENSOR_WEIGHTS_INTERVAL_MINUTES || '30');
@@ -120,10 +125,6 @@ export class TaskProcessor {
     this.markProcessing(taskId);
     logger.debug({ taskId }, 'Marked task as processing (in-memory)');
 
-    // SBC9: hoisted so the finally block can clean up regardless of where an error occurs
-    let skillId: string | undefined;
-    let importedAgentId: string | undefined;
-
     try {
       // Step 1: Claim task (idempotent - if already claimed, will fail gracefully)
       let claimed = false;
@@ -144,7 +145,14 @@ export class TaskProcessor {
         throw error;
       }
 
-      // Step 2: Prepare files (decode base64, write to temp directory)
+      // Step 2: Route skill tasks to sb-evals before any file prep (no Letta involvement)
+      if (taskPayload.skill_file_path && this.pair) {
+        logger.info({ taskId }, 'Skill task detected — routing to sb-evals');
+        await this.processSkillTask(taskId, this.pair, taskPayload);
+        return;
+      }
+
+      // Step 3: Prepare files (decode base64, write to temp directory)
       // Each task gets its own isolated directory to prevent file overwrites
       // Format: /tmp/validator-work/{taskId}/
       const taskWorkDir = path.join(this.workDir, taskId);
@@ -157,14 +165,10 @@ export class TaskProcessor {
         agentFilePath?: string;
         datasetPath?: string;
         rubricPath?: string;
-        skillId?: string;
-        importedAgentId?: string;
       };
 
       try {
         files = await this.prepareFiles(taskPayload, taskWorkDir);
-        skillId = files.skillId;
-        importedAgentId = files.importedAgentId;
       } catch (error) {
         logger.error(
           { taskId, error: error instanceof Error ? error.message : String(error) },
@@ -173,7 +177,6 @@ export class TaskProcessor {
         throw error;
       }
 
-      // Step 3: Run letta-evals
       logger.info({ taskId, suitePath: files.suitePath }, 'Running letta-evals');
 
       const evaluationResult = await this.runEvaluation(files.suitePath, taskWorkDir);
@@ -454,33 +457,92 @@ export class TaskProcessor {
         logger.info({ taskId, workDir: path.join(this.workDir, taskId) }, 'KEEP_TASK_FILES=1 set, skipping cleanup of task workDir');
       }
 
-      // SBC9: clean up skill and imported agent (letta-evals won't clean up agent_id targets)
-      if (skillId && this.lettaClient) {
-        try {
-          await this.lettaClient.deleteSkill(skillId);
-          logger.debug({ taskId, skillId }, 'Cleaned up SBC9 skill');
-        } catch (err) {
-          logger.warn(
-            { taskId, skillId, error: err instanceof Error ? err.message : String(err) },
-            'Failed to delete SBC9 skill (non-fatal)',
-          );
-        }
-      }
-      if (importedAgentId && this.lettaClient) {
-        try {
-          await this.lettaClient.deleteAgent(importedAgentId);
-          logger.debug({ taskId, importedAgentId }, 'Cleaned up SBC9 imported agent');
-        } catch (err) {
-          logger.warn(
-            { taskId, importedAgentId, error: err instanceof Error ? err.message : String(err) },
-            'Failed to delete SBC9 imported agent (non-fatal)',
-          );
-        }
-      }
-
       // Unmark processing (in-memory)
       this.unmarkProcessing(taskId);
     }
+  }
+
+  /**
+   * SBC9+: Route a skill task to sb-evals, poll for result, and submit to nestapi.
+   * The existing Letta path is completely untouched.
+   */
+  private async processSkillTask(taskId: string, pair: KeyringPair, taskPayload: Task['task_payload']): Promise<void> {
+    const roundScore = (value: number) => Math.round(value * 100_000) / 100_000;
+
+    const timeoutMs = Number(process.env.LETTA_EMBEDDING_WAIT_MINUTES || '30') * 60 * 1000;
+
+    let jobId: string;
+    try {
+      jobId = await submitSkillTask(pair, taskId, taskPayload as Record<string, unknown>);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error({ taskId, error: msg }, 'Failed to submit skill task to sb-evals');
+      await this.apiClient.submitResults(taskId, 'failed', {}, msg);
+      return;
+    }
+
+    let evaluationResult: any;
+    try {
+      evaluationResult = await pollSkillResult(pair, jobId, timeoutMs);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      logger.error({ taskId, jobId, error: msg }, 'sb-evals polling failed');
+      await this.apiClient.submitResults(taskId, 'failed', {}, msg);
+      return;
+    }
+
+    // Reuse existing result-extraction logic (same shape as letta-evals output)
+    const compactResults = Array.isArray(evaluationResult?.results)
+      ? evaluationResult.results.map((result: unknown) => {
+          if (typeof result !== 'object' || result === null) return null;
+          const resultObj = result as Record<string, any>;
+          const resultData = resultObj.result as Record<string, any> | undefined;
+          if (!resultData) return null;
+          const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
+          const performance = resultData.performance as { total_tokens?: number } | undefined;
+          const id = resultObj.id ?? resultObj.sample_id ?? resultObj.task_id;
+          const perSampleScore =
+            typeof resultData.weighted_score === 'number'
+              ? resultData.weighted_score
+              : typeof grade?.score === 'number'
+                ? grade.score
+                : null;
+          return {
+            id,
+            score: perSampleScore,
+            rationale: grade?.rationale ?? null,
+            tokens: typeof performance?.total_tokens === 'number' ? performance.total_tokens : null,
+            input: null,
+            domain: null,
+            skill: null,
+            difficulty: null,
+            capability_cluster: null,
+          };
+        }).filter((r: any) => r !== null)
+      : [];
+
+    const totalTokens = compactResults.reduce((sum: number, r: any) => sum + (typeof r.tokens === 'number' ? r.tokens : 0), 0);
+
+    const scoresWithValues = compactResults
+      .map((r: any) => r.score)
+      .filter((s: any): s is number => typeof s === 'number');
+    const calculatedTotalScore =
+      scoresWithValues.length > 0
+        ? roundScore(scoresWithValues.reduce((a: number, s: number) => a + s, 0) / scoresWithValues.length)
+        : null;
+
+    const compactPayload = {
+      results: compactResults,
+      score: calculatedTotalScore,
+      tests_count: compactResults.length,
+      duration_seconds: evaluationResult?.duration_seconds ?? null,
+      total_tokens: totalTokens,
+      timestamp: new Date().toISOString(),
+    };
+
+    logger.info({ taskId, score: calculatedTotalScore, testsCount: compactResults.length, totalTokens }, 'Submitting sb-evals skill results');
+    await this.apiClient.submitResults(taskId, 'completed', compactPayload);
+    logger.info({ taskId }, 'Skill task processed successfully via sb-evals');
   }
 
   /**
@@ -1011,16 +1073,10 @@ export class TaskProcessor {
     agentFilePath?: string;
     datasetPath?: string;
     rubricPath?: string;
-    skillId?: string;
-    importedAgentId?: string;
   }> {
     if (!workDir.startsWith(this.workDir)) {
       throw new Error(`Invalid workDir: ${workDir} is not within base workDir: ${this.workDir}`);
     }
-
-    // SBC9 skill vars — only set when skill_file_path is present
-    let skillId: string | undefined;
-    let importedAgentId: string | undefined;
 
     // Download and write agent file
     logger.info({ taskId: taskPayload.task_id, workDir }, 'PrepareFiles: start');
@@ -1612,41 +1668,6 @@ export class TaskProcessor {
       }, 'PrepareFiles: downloaded agent file (preview)');
     }
 
-    // SBC9: import base agent, create skill, and attach — only when skill_file_path is present
-    if (taskPayload.skill_file_path && this.lettaClient && agentFilePath) {
-      // Download skill.md
-      const skillContent = await this.downloadFileWithBackup(
-        taskPayload.skill_file_path,
-        taskPayload.skill_backup_file_path,
-      );
-      await fs.writeFile(path.join(workDir, 'skill.md'), skillContent, 'utf-8');
-      logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: downloaded skill.md');
-
-      // Parse YAML frontmatter for name/description
-      let skillName = 'Unnamed Skill';
-      let skillDescription = '';
-      const fmMatch = skillContent.match(/^---\n([\s\S]*?)\n---/);
-      if (fmMatch) {
-        try {
-          const fm = yaml.load(fmMatch[1]) as any;
-          if (fm?.name) skillName = String(fm.name);
-          if (fm?.description) skillDescription = String(fm.description);
-        } catch { /* use defaults */ }
-      }
-
-      // Import base agent → agent_id
-      importedAgentId = await this.lettaClient.importAgent(agentFilePath);
-      logger.debug({ taskId: taskPayload.task_id, importedAgentId }, 'PrepareFiles: imported base agent');
-
-      // Create skill and attach to agent
-      skillId = await this.lettaClient.createSkill(skillName, skillDescription, skillContent);
-      logger.debug({ taskId: taskPayload.task_id, skillId }, 'PrepareFiles: created skill');
-      await this.lettaClient.attachSkillToAgent(importedAgentId, skillId);
-      logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: attached skill to agent');
-      await this.lettaClient.attachToolToAgent(importedAgentId, 'load_skill');
-      logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: attached load_skill tool to agent');
-    }
-
     // Download and write dataset
     let datasetPath: string | undefined;
     const dataset = taskPayload.dataset_file_path;
@@ -1690,21 +1711,6 @@ export class TaskProcessor {
       } else {
         // External file path
         datasetPath = dataset;
-      }
-    }
-
-    // SBC9: sample 2 variants per scenario type (8 total), seeded by task_id
-    // No-op if dataset is not SBC9-shaped. Only runs for skill submissions.
-    if (datasetPath && taskPayload.skill_file_path) {
-      try {
-        const { stdout, stderr } = await execAsync(
-          `python3 /app/python/sample_variants.py "${datasetPath}" "${taskPayload.task_id}"`,
-        );
-        if (stdout?.trim()) logger.debug({ taskId: taskPayload.task_id }, `sample_variants: ${stdout.trim()}`);
-        if (stderr?.trim()) logger.warn({ taskId: taskPayload.task_id }, `sample_variants stderr: ${stderr.trim()}`);
-        logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: sampled SBC9 variants');
-      } catch (error) {
-        logger.warn({ taskId: taskPayload.task_id, error }, 'PrepareFiles: sample_variants.py failed (non-fatal, using full dataset)');
       }
     }
 
@@ -1815,14 +1821,6 @@ export class TaskProcessor {
     if (agentFilePath && suiteConfig.target) {
       const agentBasename = path.basename(agentFilePath);
       suiteConfig.target.agent_file = agentBasename;
-    }
-
-    // SBC9: use pre-imported agent_id so letta-evals picks up the attached skill
-    // Without this, letta-evals would re-import a fresh agent that has no skill attached
-    if (importedAgentId && suiteConfig.target) {
-      suiteConfig.target.agent_id = importedAgentId;
-      delete suiteConfig.target.agent_file;
-      logger.debug({ taskId: taskPayload.task_id, importedAgentId }, 'PrepareFiles: overriding suite target with agent_id');
     }
 
     // Update agent_design and blacklist grader's agent_file_path if they exist in suite.yaml
@@ -1968,22 +1966,6 @@ export class TaskProcessor {
       }
     }
 
-    // SBC9: copy skill_evaluation.py + dataset_sbc9.jsonl if skill graders present
-    if (suiteConfig.graders?.skill_integrity || suiteConfig.graders?.skill_use || suiteConfig.graders?.scenario_quality) {
-      try {
-        await fs.copyFile('/app/python/skill_evaluation.py', path.join(workDir, 'skill_evaluation.py'));
-        logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: copied skill_evaluation.py');
-      } catch (error) {
-        logger.error({ taskId: taskPayload.task_id, error: error instanceof Error ? error.message : String(error) }, 'PrepareFiles: failed to copy skill_evaluation.py');
-      }
-      try {
-        await fs.copyFile('/app/python/dataset_sbc9.jsonl', path.join(workDir, 'dataset_sbc9.jsonl'));
-        logger.debug({ taskId: taskPayload.task_id }, 'PrepareFiles: copied dataset_sbc9.jsonl');
-      } catch (error) {
-        logger.warn({ taskId: taskPayload.task_id, error: error instanceof Error ? error.message : String(error) }, 'PrepareFiles: failed to copy dataset_sbc9.jsonl (non-fatal)');
-      }
-    }
-
     logger.debug({
       taskId: taskPayload.task_id,
       suitePath,
@@ -1997,8 +1979,6 @@ export class TaskProcessor {
       agentFilePath,
       datasetPath,
       rubricPath,
-      skillId,
-      importedAgentId,
     };
   }
 
