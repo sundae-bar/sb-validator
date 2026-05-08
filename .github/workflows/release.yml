@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
     inputs:
       dry_run:
@@ -14,13 +16,17 @@ permissions:
   contents: write  # needed to push the version tag back to origin
 
 jobs:
-  release:
+  # Runs on PRs targeting main as a required status check, and as a
+  # gate before the release job on push. Single source of truth for
+  # "is package.json bumped to a version we haven't released yet."
+  version_check:
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Read package.json version
         id: version
@@ -36,7 +42,19 @@ jobs:
             echo "::error::Tag $TAG already exists on origin. Bump 'version' in package.json before merging staging into main."
             exit 1
           fi
-          echo "Tag $TAG is new — proceeding with release."
+          echo "Tag $TAG is new — version bump confirmed."
+
+  release:
+    # PRs only run the version_check gate. The actual release fires on
+    # push-to-main (after the PR merges) or manual workflow_dispatch.
+    if: github.event_name != 'pull_request'
+    needs: version_check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -50,7 +68,7 @@ jobs:
           context: .
           push: ${{ inputs.dry_run != true }}
           tags: |
-            sundaebarai/sn121-validator:${{ steps.version.outputs.tag }}
+            sundaebarai/sn121-validator:${{ needs.version_check.outputs.tag }}
             sundaebarai/sn121-validator:latest
 
       # Tag last: if Docker Hub push fails, we don't want a stranded git tag.
@@ -59,5 +77,5 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag "${{ steps.version.outputs.tag }}"
-          git push origin "${{ steps.version.outputs.tag }}"
+          git tag "${{ needs.version_check.outputs.tag }}"
+          git push origin "${{ needs.version_check.outputs.tag }}"
