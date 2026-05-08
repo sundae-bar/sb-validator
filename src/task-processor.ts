@@ -491,6 +491,29 @@ export class TaskProcessor {
       return;
     }
 
+    // Mirror the letta-evals path: persist the full evaluation output so
+    // the coordinator's /download/task/:id/test-output endpoint has
+    // something to serve. Non-fatal — scoring still succeeds without it.
+    try {
+      const tmpDir = path.join(this.workDir, taskId);
+      await fs.mkdir(tmpDir, { recursive: true });
+      const rawOutputPath = path.join(tmpDir, 'raw_evaluation.json');
+      await fs.writeFile(
+        rawOutputPath,
+        JSON.stringify(evaluationResult, null, 2),
+      );
+      await this.apiClient.uploadRawOutputFile(taskId, rawOutputPath);
+    } catch (rawError) {
+      logger.warn(
+        {
+          taskId,
+          jobId,
+          error: rawError instanceof Error ? rawError.message : String(rawError),
+        },
+        'Failed to upload sb-evals raw output (non-fatal)',
+      );
+    }
+
     // Reuse existing result-extraction logic (same shape as letta-evals output)
     const compactResults = Array.isArray(evaluationResult?.results)
       ? evaluationResult.results.map((result: unknown) => {

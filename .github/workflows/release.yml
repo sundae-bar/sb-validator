@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Skip Docker Hub push and git tag (build + login only)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write  # needed to push the version tag back to origin
+
+jobs:
+  # Runs on PRs targeting main as a required status check, and as a
+  # gate before the release job on push. Single source of truth for
+  # "is package.json bumped to a version we haven't released yet."
+  version_check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read package.json version
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version was bumped
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if git ls-remote --tags origin "refs/tags/$TAG" | grep -q "refs/tags/$TAG$"; then
+            echo "::error::Tag $TAG already exists on origin. Bump 'version' in package.json before merging staging into main."
+            exit 1
+          fi
+          echo "Tag $TAG is new — version bump confirmed."
+
+  release:
+    # PRs only run the version_check gate. The actual release fires on
+    # push-to-main (after the PR merges) or manual workflow_dispatch.
+    if: github.event_name != 'pull_request'
+    needs: version_check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: ${{ inputs.dry_run != true }}
+          tags: |
+            sundaebarai/sn121-validator:${{ needs.version_check.outputs.tag }}
+            sundaebarai/sn121-validator:latest
+
+      # Tag last: if Docker Hub push fails, we don't want a stranded git tag.
+      - name: Create and push git tag
+        if: inputs.dry_run != true
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${{ needs.version_check.outputs.tag }}"
+          git push origin "${{ needs.version_check.outputs.tag }}"
