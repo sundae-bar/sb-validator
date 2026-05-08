@@ -1,0 +1,28 @@
+name: Reset staging to main
+
+# Runs after every push to main (i.e. every staging→main release merge)
+# and force-pushes staging to point at main's tip. Prevents the divergent-
+# history conflict that accumulates when squash merges + linear history
+# leave staging with commits that have already been collapsed onto main.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Force-push staging to match main
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git push --force origin main:staging
