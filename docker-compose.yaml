@@ -48,7 +48,7 @@ services:
       start_period: 60s
 
   sbevals:
-    image: sundaebarai/sb-evals:latest
+    image: sundaebarai/sn121-skill-evals:latest
     container_name: sn121-sbevals
     ports:
       - "8090:8090"
