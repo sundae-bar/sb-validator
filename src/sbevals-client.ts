@@ -44,7 +44,7 @@ export async function submitSkillTask(
 /**
  * Poll sb-evals until the job completes or times out. Returns the result object.
  */
-export async function pollSkillResult(pair: KeyringPair, jobId: string, timeoutMs: number): Promise<any> {
+export async function pollSkillResult(pair: KeyringPair, jobId: string, timeoutMs: number): Promise<unknown> {
   const deadline = Date.now() + timeoutMs;
 
   logger.info({ jobId, timeoutMs, pollIntervalMs: POLL_INTERVAL_MS }, 'Polling sb-evals for skill result');

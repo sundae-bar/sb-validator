@@ -15,6 +15,7 @@
 // It focuses only on: "given weights, send a single setWeights transaction".
 
 import { ApiPromise, WsProvider } from '@polkadot/api';
+import type { ISubmittableResult, AnyJson } from '@polkadot/types/types';
 import { Keyring } from '@polkadot/keyring';
 import { cryptoWaitReady } from '@polkadot/util-crypto';
 
@@ -351,7 +352,7 @@ export const submitSn121Weights = async (
         // In Bittensor, we can check the validatorPermit array for the subnet
         logger.debug('sn121: fetching metagraph via runtime API...');
         const metagraphResult = await api.call.subnetInfoRuntimeApi.getMetagraph(netuid);
-        const metagraphData = metagraphResult.toHuman() as any;
+        const metagraphData = metagraphResult.toHuman() as Record<string, unknown> | null;
 
         if (!metagraphData) {
             logger.warn(
@@ -362,9 +363,9 @@ export const submitSn121Weights = async (
                 'sn121: could not fetch metagraph data (proceeding anyway - network will reject if invalid)'
             );
         } else {
-            const hotkeys = metagraphData.hotkeys || [];
-            const validatorPermits = metagraphData.validatorPermit || [];
-            const totalValidators = validatorPermits.filter((p: any) => p === true).length;
+            const hotkeys = (metagraphData.hotkeys as unknown[]) || [];
+            const validatorPermits = (metagraphData.validatorPermit as unknown[]) || [];
+            const totalValidators = validatorPermits.filter((p) => p === true).length;
 
             logger.debug(
                 {
@@ -462,7 +463,7 @@ export const submitSn121Weights = async (
     const totalFloatWeight = floatWeights.reduce((sum, w) => sum + w, 0);
     
     // Convert to integers, ensuring they sum to SCALE_FACTOR
-    let weights: number[] = [];
+    const weights: number[] = [];
     let totalIntWeight = 0;
     
     // First pass: convert to integers (rounding)
@@ -576,7 +577,7 @@ export const submitSn121Weights = async (
     try {
         await new Promise<void>((resolve, reject) => {
             extrinsic
-                .signAndSend(account, (result: any) => {
+                .signAndSend(account, (result: ISubmittableResult) => {
                     const { status, dispatchError, events } = result;
 
                     logger.debug(
@@ -608,7 +609,7 @@ export const submitSn121Weights = async (
                         if (events && events.length > 0) {
                             logger.debug(
                                 {
-                                    events: events.map((e: any) => ({
+                                    events: events.map((e) => ({
                                         phase: e.phase?.toString(),
                                         event: e.event?.toString(),
                                         data: e.event?.data?.toString(),

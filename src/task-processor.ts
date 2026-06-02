@@ -702,7 +702,7 @@ export class TaskProcessor {
     // GitHub API URL format: https://api.github.com/repos/owner/repo/contents/path
     // Extract owner, repo, branch, and path from the GitHub URL
     // Format: https://github.com/owner/repo/tree/branch/path
-    const match = repoUrl.match(/https:\/\/github\.com\/([^\/]+)\/([^\/]+)\/tree\/([^\/]+)\/(.+)/);
+    const match = repoUrl.match(/https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+)/);
     if (!match) {
       throw new Error(`Invalid GitHub URL format: ${repoUrl}. Expected format: https://github.com/owner/repo/tree/branch/path`);
     }
@@ -1593,7 +1593,7 @@ export class TaskProcessor {
     }
 
     let agentFilePath: string | undefined;
-    let agentFileName = 'agent.af';
+    const agentFileName = 'agent.af';
     
     if (taskPayload.agent_file_path) {
       logger.debug(
@@ -1738,8 +1738,7 @@ export class TaskProcessor {
     }
 
     // Download and write rubric (required)
-    let rubricPath: string | undefined;
-    rubricPath = path.join(workDir, 'rubric.txt');
+    const rubricPath: string = path.join(workDir, 'rubric.txt');
     if (!taskPayload.rubric_file_path) {
       throw new Error(`Rubric file path is required but not provided for task ${taskPayload.task_id}`);
     }
@@ -2371,10 +2370,10 @@ export class TaskProcessor {
     // Prepare for batch processing or single evaluation
     let results: unknown[] = [];
     let summary: Record<string, unknown> | null = null;
-    let allResults: unknown[] = [];
-    let allSummaries: Record<string, unknown>[] = [];
+    const allResults: unknown[] = [];
+    const allSummaries: Record<string, unknown>[] = [];
     let totalTokensUsed = 0;
-    let batchFilesToCleanup: string[] = [];
+    const batchFilesToCleanup: string[] = [];
     
     if (useBatching) {
       // Split dataset into batches
@@ -2489,7 +2488,7 @@ export class TaskProcessor {
           const batchResultsPath = path.join(batchOutputDir, 'results.jsonl');
           const batchSummaryPath = path.join(batchOutputDir, 'summary.json');
           
-          let batchResults: unknown[] = [];
+          const batchResults: unknown[] = [];
           let batchSummary: Record<string, unknown> | null = null;
           
           try {
@@ -2833,10 +2832,10 @@ export class TaskProcessor {
     }
     
     // Now run the evaluation using wrapper script (only if not using batching)
-    let stdout = '';
-    let stderr = '';
-    let commandFailed = false;
-    let gateFailed = false;
+    const stdout = '';
+    const stderr = '';
+    const commandFailed = false;
+    const gateFailed = false;
     
     if (!useBatching) {
     const cmd = `${pythonCmd} /app/python/run_with_graders.py run "${suiteFile}" --output "${outputDir}"`;
@@ -3289,7 +3288,7 @@ export class TaskProcessor {
       const artifacts: Record<string, string> = {};
 
       // Read suite.yaml to get grader weights for weighted average calculation
-      let graderWeights: Record<string, number> = {};
+      const graderWeights: Record<string, number> = {};
       try {
         const suiteYamlContent = await fs.readFile(suitePath, 'utf-8');
         const suiteConfig = yaml.load(suiteYamlContent) as any;
