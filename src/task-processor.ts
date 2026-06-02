@@ -554,16 +554,29 @@ export class TaskProcessor {
         ? roundScore(scoresWithValues.reduce((a: number, s: number) => a + s, 0) / scoresWithValues.length)
         : null;
 
+    // Defense in depth: sb_evals owns the gate, but the validator is what signs
+    // weights on-chain — never submit a positive score if the eval said the gate failed.
+    const evalMetrics = (evaluationResult?.summary as { metrics?: Record<string, unknown> } | undefined)?.metrics;
+    const gatePassed = evalMetrics?.overall_gate_passed;
+    const gateFailed = gatePassed === 0 || gatePassed === false;
+    const finalScore = gateFailed ? 0 : calculatedTotalScore;
+    if (gateFailed && calculatedTotalScore !== 0 && calculatedTotalScore !== null) {
+      logger.warn(
+        { taskId, calculatedTotalScore, overall_gate_passed: gatePassed },
+        'sb-evals reported gate failure but per-sample scores were positive — hard-zeroing submitted score',
+      );
+    }
+
     const compactPayload = {
       results: compactResults,
-      score: calculatedTotalScore,
+      score: finalScore,
       tests_count: compactResults.length,
       duration_seconds: evaluationResult?.duration_seconds ?? null,
       total_tokens: totalTokens,
       timestamp: new Date().toISOString(),
     };
 
-    logger.info({ taskId, score: calculatedTotalScore, testsCount: compactResults.length, totalTokens }, 'Submitting sb-evals skill results');
+    logger.info({ taskId, score: finalScore, testsCount: compactResults.length, totalTokens }, 'Submitting sb-evals skill results');
     await this.apiClient.submitResults(taskId, 'completed', compactPayload);
     logger.info({ taskId }, 'Skill task processed successfully via sb-evals');
   }
