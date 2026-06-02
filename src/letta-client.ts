@@ -112,15 +112,17 @@ export class LettaClient {
    * List agents
    * Uses simple request (no pagination) since pagination is not working reliably
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async listAgents(): Promise<any[]> {
     logger.debug('Listing Letta agents');
 
     try {
-      const params: any = { 
+      const params: Record<string, unknown> = {
         limit: 100
         // Note: API only supports order_by: 'created_at' but created_at is always null, so no ordering
       };
-      
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await this.client.get<any[]>('/v1/agents/', { params });
       const agents = response.data || [];
       logger.debug(
@@ -243,7 +245,7 @@ export class LettaClient {
     logger.debug({ name }, 'Listing Letta folders');
 
     try {
-      const params: any = { 
+      const params: Record<string, unknown> = {
         limit: 100
         // Note: API only supports order_by: 'created_at' but created_at is always null, so no ordering
       };
@@ -327,7 +329,7 @@ export class LettaClient {
         // Use consistent ordering to ensure we process folders in a predictable way
         let folders: Folder[];
         try {
-          const params: any = { 
+          const params: Record<string, unknown> = {
             limit: 100
             // Note: Not using order/order_by since created_at is always null
           };
@@ -562,20 +564,21 @@ export class LettaClient {
       let response;
       try {
         response = await this.client.post<Folder>(folderUrl, requestPayload);
-      } catch (error: any) {
+      } catch (error) {
         // Log the full error details
+        const axErr = error as AxiosError;
         logger.error(
           {
-            error: error.message,
-            status: error.response?.status,
-            statusText: error.response?.statusText,
-            data: error.response?.data,
-            headers: error.response?.headers,
+            error: axErr.message,
+            status: axErr.response?.status,
+            statusText: axErr.response?.statusText,
+            data: axErr.response?.data,
+            headers: axErr.response?.headers,
             config: {
-              url: error.config?.url,
-              method: error.config?.method,
-              data: error.config?.data,
-              headers: error.config?.headers
+              url: axErr.config?.url,
+              method: axErr.config?.method,
+              data: axErr.config?.data,
+              headers: axErr.config?.headers
             }
           },
           'Folder creation request failed'

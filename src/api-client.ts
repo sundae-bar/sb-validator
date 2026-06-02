@@ -35,7 +35,7 @@ export class ApiClient {
     
     // Handle API_URL that might include the full path (e.g., http://localhost:3002/api/v2/validators)
     // or just the base URL (e.g., http://localhost:3002)
-    let baseUrl = apiUrl.replace(/\/$/, ''); // Remove trailing slash
+    const baseUrl = apiUrl.replace(/\/$/, ''); // Remove trailing slash
     
     // If API_URL already includes /api/v2/validators, use it as-is
     // Otherwise, we'll append the path in each method
@@ -132,7 +132,7 @@ export class ApiClient {
   ): Promise<T> {
     const url = this.getApiPath(path);
     let signature: string | undefined;
-    let body: any = payload;
+    const body: object | undefined = payload;
 
     // Sign the request if there's a payload
     if (payload) {

@@ -1,0 +1,53 @@
+name: CI
+
+# Triggers on PRs to main AND staging. The validator's flow is
+# feature → staging → main, so only checking PRs to main would mean
+# feature branches accumulate in staging without typecheck or build
+# verification.
+on:
+  pull_request:
+    branches: [main, staging]
+
+# Cancel older runs when a new commit is pushed to the same PR — safe
+# because every job is read-only (typecheck, docker build without push).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  # Verifies the validator image still builds on every PR. Doesn't push —
+  # that only happens on push-to-main in release.yml. cache-from/to populates
+  # the GHA cache so the actual release build is incremental.
+  docker_build_check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

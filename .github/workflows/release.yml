@@ -56,17 +56,25 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # cache-from/to reuses the GHA cache populated by ci.yml's
+      # docker_build_check job — so this release build is incremental
+      # whenever the underlying layers haven't changed.
       - name: Build and push image
         uses: docker/build-push-action@v6
         with:
           context: .
           push: ${{ inputs.dry_run != true }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           tags: |
             sundaebarai/sn121-validator:${{ needs.version_check.outputs.tag }}
             sundaebarai/sn121-validator:latest

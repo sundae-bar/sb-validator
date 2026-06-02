@@ -81,7 +81,7 @@ export function signPayload(pair: KeyringPair, payload: object | string): string
  */
 export function signRequest(pair: KeyringPair, payload: object): string {
   // Remove signature fields if present
-  const { signature, signed_payload, ...cleanPayload } = payload as any;
+  const { signature: _signature, signed_payload: _signed_payload, ...cleanPayload } = payload as Record<string, unknown>;
   return signPayload(pair, cleanPayload);
 }
 
