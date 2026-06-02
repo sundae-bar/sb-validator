@@ -554,16 +554,30 @@ export class TaskProcessor {
         ? roundScore(scoresWithValues.reduce((a: number, s: number) => a + s, 0) / scoresWithValues.length)
         : null;
 
+    // Honor the eval-service's verdict. The validator is what signs on-chain
+    // weights, so it treats the summary verdict as authoritative — if the
+    // upstream verdict is failure, normalize the submitted score to 0.
+    const evalMetrics = (evaluationResult?.summary as { metrics?: Record<string, unknown> } | undefined)?.metrics;
+    const verdictPassed = evalMetrics?.overall_gate_passed;
+    const verdictFailed = verdictPassed === 0 || verdictPassed === false;
+    const finalScore = verdictFailed ? 0 : calculatedTotalScore;
+    if (verdictFailed && calculatedTotalScore !== 0 && calculatedTotalScore !== null) {
+      logger.warn(
+        { taskId, calculatedTotalScore, overall_gate_passed: verdictPassed },
+        'eval-service reported verdict failure but per-sample average was non-zero — normalizing submitted score to 0',
+      );
+    }
+
     const compactPayload = {
       results: compactResults,
-      score: calculatedTotalScore,
+      score: finalScore,
       tests_count: compactResults.length,
       duration_seconds: evaluationResult?.duration_seconds ?? null,
       total_tokens: totalTokens,
       timestamp: new Date().toISOString(),
     };
 
-    logger.info({ taskId, score: calculatedTotalScore, testsCount: compactResults.length, totalTokens }, 'Submitting sb-evals skill results');
+    logger.info({ taskId, score: finalScore, testsCount: compactResults.length, totalTokens }, 'Submitting sb-evals skill results');
     await this.apiClient.submitResults(taskId, 'completed', compactPayload);
     logger.info({ taskId }, 'Skill task processed successfully via sb-evals');
   }
