@@ -554,16 +554,30 @@ export class TaskProcessor {
         ? roundScore(scoresWithValues.reduce((a: number, s: number) => a + s, 0) / scoresWithValues.length)
         : null;
 
+    // Honor the eval-service's verdict. The validator is what signs on-chain
+    // weights, so it treats the summary verdict as authoritative — if the
+    // upstream verdict is failure, normalize the submitted score to 0.
+    const evalMetrics = (evaluationResult?.summary as { metrics?: Record<string, unknown> } | undefined)?.metrics;
+    const verdictPassed = evalMetrics?.overall_gate_passed;
+    const verdictFailed = verdictPassed === 0 || verdictPassed === false;
+    const finalScore = verdictFailed ? 0 : calculatedTotalScore;
+    if (verdictFailed && calculatedTotalScore !== 0 && calculatedTotalScore !== null) {
+      logger.warn(
+        { taskId, calculatedTotalScore, overall_gate_passed: verdictPassed },
+        'eval-service reported verdict failure but per-sample average was non-zero — normalizing submitted score to 0',
+      );
+    }
+
     const compactPayload = {
       results: compactResults,
-      score: calculatedTotalScore,
+      score: finalScore,
       tests_count: compactResults.length,
       duration_seconds: evaluationResult?.duration_seconds ?? null,
       total_tokens: totalTokens,
       timestamp: new Date().toISOString(),
     };
 
-    logger.info({ taskId, score: calculatedTotalScore, testsCount: compactResults.length, totalTokens }, 'Submitting sb-evals skill results');
+    logger.info({ taskId, score: finalScore, testsCount: compactResults.length, totalTokens }, 'Submitting sb-evals skill results');
     await this.apiClient.submitResults(taskId, 'completed', compactPayload);
     logger.info({ taskId }, 'Skill task processed successfully via sb-evals');
   }
@@ -702,7 +716,7 @@ export class TaskProcessor {
     // GitHub API URL format: https://api.github.com/repos/owner/repo/contents/path
     // Extract owner, repo, branch, and path from the GitHub URL
     // Format: https://github.com/owner/repo/tree/branch/path
-    const match = repoUrl.match(/https:\/\/github\.com\/([^\/]+)\/([^\/]+)\/tree\/([^\/]+)\/(.+)/);
+    const match = repoUrl.match(/https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+)/);
     if (!match) {
       throw new Error(`Invalid GitHub URL format: ${repoUrl}. Expected format: https://github.com/owner/repo/tree/branch/path`);
     }
@@ -1593,7 +1607,7 @@ export class TaskProcessor {
     }
 
     let agentFilePath: string | undefined;
-    let agentFileName = 'agent.af';
+    const agentFileName = 'agent.af';
     
     if (taskPayload.agent_file_path) {
       logger.debug(
@@ -1738,8 +1752,7 @@ export class TaskProcessor {
     }
 
     // Download and write rubric (required)
-    let rubricPath: string | undefined;
-    rubricPath = path.join(workDir, 'rubric.txt');
+    const rubricPath: string = path.join(workDir, 'rubric.txt');
     if (!taskPayload.rubric_file_path) {
       throw new Error(`Rubric file path is required but not provided for task ${taskPayload.task_id}`);
     }
@@ -2371,10 +2384,10 @@ export class TaskProcessor {
     // Prepare for batch processing or single evaluation
     let results: unknown[] = [];
     let summary: Record<string, unknown> | null = null;
-    let allResults: unknown[] = [];
-    let allSummaries: Record<string, unknown>[] = [];
+    const allResults: unknown[] = [];
+    const allSummaries: Record<string, unknown>[] = [];
     let totalTokensUsed = 0;
-    let batchFilesToCleanup: string[] = [];
+    const batchFilesToCleanup: string[] = [];
     
     if (useBatching) {
       // Split dataset into batches
@@ -2489,7 +2502,7 @@ export class TaskProcessor {
           const batchResultsPath = path.join(batchOutputDir, 'results.jsonl');
           const batchSummaryPath = path.join(batchOutputDir, 'summary.json');
           
-          let batchResults: unknown[] = [];
+          const batchResults: unknown[] = [];
           let batchSummary: Record<string, unknown> | null = null;
           
           try {
@@ -2833,10 +2846,10 @@ export class TaskProcessor {
     }
     
     // Now run the evaluation using wrapper script (only if not using batching)
-    let stdout = '';
-    let stderr = '';
-    let commandFailed = false;
-    let gateFailed = false;
+    const stdout = '';
+    const stderr = '';
+    const commandFailed = false;
+    const gateFailed = false;
     
     if (!useBatching) {
     const cmd = `${pythonCmd} /app/python/run_with_graders.py run "${suiteFile}" --output "${outputDir}"`;
@@ -3289,7 +3302,7 @@ export class TaskProcessor {
       const artifacts: Record<string, string> = {};
 
       // Read suite.yaml to get grader weights for weighted average calculation
-      let graderWeights: Record<string, number> = {};
+      const graderWeights: Record<string, number> = {};
       try {
         const suiteYamlContent = await fs.readFile(suitePath, 'utf-8');
         const suiteConfig = yaml.load(suiteYamlContent) as any;

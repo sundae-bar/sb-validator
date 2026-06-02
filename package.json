@@ -1,19 +1,25 @@
 {
   "name": "sundae-bar-validator",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Secure validator client for sundae_bar SN121 subnet",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
+    "lint": "eslint .",
     "test": "echo \"Error: no test specified\" && exit 1",
     "docker:build": "docker buildx build --platform linux/amd64,linux/arm64 -t sundaebarai/sn121-validator:latest -t sundaebarai/sn121-validator:$(node -p \"require('./package.json').version\") .",
     "docker:push": "docker buildx build --platform linux/amd64,linux/arm64 -t sundaebarai/sn121-validator:latest -t sundaebarai/sn121-validator:$(node -p \"require('./package.json').version\") --push .",
     "tag:latest": "git tag v$(node -p \"require('./package.json').version\")",
     "tag:latest:push": "npm run tag:latest && git push origin v$(node -p \"require('./package.json').version\")"
   },
-  "keywords": ["validator", "bittensor", "letta", "evaluation"],
+  "keywords": [
+    "validator",
+    "bittensor",
+    "letta",
+    "evaluation"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
@@ -21,20 +27,22 @@
     "@polkadot/keyring": "14.0.1",
     "@polkadot/util": "14.0.1",
     "@polkadot/util-crypto": "14.0.1",
+    "@types/js-yaml": "^4.0.9",
     "axios": "^1.13.2",
     "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "form-data": "^4.0.0",
     "js-yaml": "^4.1.0",
-    "@types/js-yaml": "^4.0.9",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/express": "^5.0.5",
     "@types/node": "^24.10.1",
+    "eslint": "^10.4.1",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.60.1"
   }
 }
-
