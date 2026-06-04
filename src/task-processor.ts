@@ -530,10 +530,32 @@ export class TaskProcessor {
               : typeof grade?.score === 'number'
                 ? grade.score
                 : null;
+          // Per-grader breakdown so the FE can render each grader's score +
+          // rationale instead of the flattened single-line aggregate string.
+          const rawGrades = resultData.grades_by_key as Record<string, unknown> | undefined;
+          const gradesByKey =
+            rawGrades && typeof rawGrades === 'object'
+              ? Object.fromEntries(
+                  Object.entries(rawGrades).flatMap(([key, g]) => {
+                    if (typeof g !== 'object' || g === null) return [];
+                    const gg = g as { score?: unknown; rationale?: unknown };
+                    return [
+                      [
+                        key,
+                        {
+                          score: typeof gg.score === 'number' ? gg.score : null,
+                          rationale: typeof gg.rationale === 'string' ? gg.rationale : null,
+                        },
+                      ],
+                    ];
+                  }),
+                )
+              : null;
           return {
             id,
             score: perSampleScore,
             rationale: grade?.rationale ?? null,
+            grades_by_key: gradesByKey,
             tokens: typeof performance?.total_tokens === 'number' ? performance.total_tokens : null,
             input: null,
             domain: null,
