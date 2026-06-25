@@ -56,9 +56,22 @@ services:
       - NODE_ENV=production
       - SERVER_PORT=8090
       - EVAL_SERVICE_API_KEY=${SBEVALS_API_KEY}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Provider keys — each challenge's suite.yaml selects the provider, so forward
+      # them all; unset ones stay empty. Chutes/OpenRouter cover most skill challenges.
+      - CHUTES_API_KEY=${CHUTES_API_KEY:-}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
+      - TOGETHER_API_KEY=${TOGETHER_API_KEY:-}
+      - TOGETHERAI_API_KEY=${TOGETHERAI_API_KEY:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # Optional global override for the skill-specific judge graders
+      # (evaluate_skill_use, evaluate_scenario_quality, dataset_derived_knowledge,
+      # skill_rubric_alignment), which otherwise default to openai/gpt-5.1. Leave
+      # unset to keep that default, or point them at e.g. openrouter/chutes.
+      - SKILL_USE_JUDGE_PROVIDER=${SKILL_USE_JUDGE_PROVIDER:-}
+      - SKILL_USE_JUDGE_MODEL=${SKILL_USE_JUDGE_MODEL:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8090/health || exit 1"]
@@ -85,7 +98,7 @@ services:
       - ${HOME}/.bittensor/wallets:/home/validator/.bittensor/wallets:ro
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8283/v1/health || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
