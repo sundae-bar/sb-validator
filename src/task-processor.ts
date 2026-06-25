@@ -441,8 +441,7 @@ export class TaskProcessor {
       throw error;
     } finally {
       // Cleanup: remove temp files (can be disabled via KEEP_TASK_FILES=1 for debugging)
-      let keepTaskFiles = process.env.KEEP_TASK_FILES === '1';
-      keepTaskFiles = false;
+      const keepTaskFiles = process.env.KEEP_TASK_FILES === '1';
       if (!keepTaskFiles) {
         try {
           const taskWorkDir = path.join(this.workDir, taskId);
