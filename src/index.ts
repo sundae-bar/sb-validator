@@ -96,17 +96,15 @@ async function main(): Promise<void> {
       'Configuration loaded'
     );
 
-    // Require LETTA_BASE_URL (hosted instance only)
-    if (!process.env.LETTA_BASE_URL) {
-      throw new Error(
-        'No LETTA_BASE_URL configured.\n' +
-        'Run the Letta server separately (see ../letta-server) and set LETTA_BASE_URL.'
-      );
+    // LETTA_BASE_URL is optional: skill challenges are evaluated by sb-evals over
+    // HTTP and never touch Letta. It is only needed for the dormant legacy agent
+    // (.af) track; when unset, that track is simply unavailable (skill-only mode).
+    if (process.env.LETTA_BASE_URL) {
+      const baseUrl = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
+      logger.info({ url: baseUrl }, 'Letta server configured (legacy agent track)');
+    } else {
+      logger.info('LETTA_BASE_URL not set — running skill-only (legacy agent track disabled)');
     }
-
-    // Strip quotes if present (common when set in docker-compose or shell scripts)
-    const baseUrl = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
-    logger.info({ url: baseUrl, raw: process.env.LETTA_BASE_URL }, 'Using external Letta server');
 
     // Create and start validator
     const validator = new Validator(config);

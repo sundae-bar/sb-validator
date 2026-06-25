@@ -8,7 +8,7 @@ import type { KeyringPair } from '@polkadot/keyring/types';
 import { getHotkey } from './signature';
 import logger from './logger';
 
-const SBEVALS_URL = (process.env.SBEVALS_URL || 'https://sbevals-production.up.railway.app').replace(/\/$/, '');
+const SBEVALS_URL = (process.env.SBEVALS_URL || 'http://localhost:8090').replace(/\/$/, '');
 const SBEVALS_API_KEY = process.env.SBEVALS_API_KEY || '';
 const POLL_INTERVAL_MS = Number(process.env.SBEVALS_POLL_INTERVAL_SECONDS || '5') * 1000;
 
