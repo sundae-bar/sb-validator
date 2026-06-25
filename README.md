@@ -1,11 +1,21 @@
 # sundae_bar Validator
 
-Secure validator client for sundae_bar SN121 subnet. This validator polls for evaluation tasks, processes them, and submits results back to the coordinator.
+**Docker image:** [`sundaebarai/sn121-validator`](https://hub.docker.com/r/sundaebarai/sn121-validator) · **Source:** [github.com/sundae-bar/sb-validator](https://github.com/sundae-bar/sb-validator)
+
+Secure validator client for the sundae_bar **SN121** subnet. This validator polls for evaluation tasks, routes each task to the correct evaluator, processes it, and submits results back to the coordinator.
+
+## How challenges are evaluated
+
+The validator evaluates **skill challenges (`.md`)** by routing them to the in-house **`sbevals`** evaluator over HTTP. This is the active track and the only one you need to set up. `sbevals` runs the skill: it executes a test agent loaded with the submitted `SKILL.md` (making LLM calls to produce outputs) and then scores those outputs with LLM-as-judge graders.
+
+Routing is automatic. If a task carries a `skill_file_path` (a `SKILL.md`), the validator sends it to `sbevals` and polls for the result.
+
+> **Legacy agent track (`.af`):** an older agent track (Letta + the Python `letta-evals` runner) still exists in the codebase and ships with the default stack, but it is **dormant**: agent challenges have been retired in favour of skills. You do not need to set up, configure, or think about Letta to run a validator. It is kept only so the agent track can be brought back if we ever run agent challenges again.
 
 ## Features
 
 - ✅ **Secure Authentication**: Hotkey-based signature authentication
-- ✅ **Task Processing**: Polls, claims, and evaluates agent submissions
+- ✅ **Skill Evaluation**: Routes skill (`.md`) submissions to the `sbevals` evaluator and submits scores
 - ✅ **Bittensor Integration**: Submits weights to Bittensor subnet 121 based on leader performance
 - ✅ **Robust Error Handling**: Comprehensive retry logic with exponential backoff
 - ✅ **Health Monitoring**: Automatic heartbeats and HTTP health endpoints
@@ -16,19 +26,22 @@ Secure validator client for sundae_bar SN121 subnet. This validator polls for ev
 ## System Requirements
 
 ### vCPU
+
 - **Minimum**: 1 vCPU
 - **Recommended**: 2+ vCPUs for better concurrent task processing
 - The validator can process tasks sequentially or concurrently (configurable via `MAX_CONCURRENT_TASKS`)
 
 ### Memory
+
 - **Minimum**: 2 GB RAM
 - **Recommended**: 4 GB RAM or more
 - Memory usage scales with:
   - Number of concurrent tasks (`MAX_CONCURRENT_TASKS`)
-  - Task complexity (agent execution steps, file sizes)
-  - Python evaluation processes (`letta-evals`)
+  - Task complexity (number of samples, file sizes)
+  - The `sbevals` skill evaluator running alongside the validator
 
 ### Storage
+
 - **Minimum**: 5 GB free disk space
 - **Recommended**: 10+ GB for:
   - Docker images (~2-3 GB)
@@ -37,60 +50,65 @@ Secure validator client for sundae_bar SN121 subnet. This validator polls for ev
 - Storage requirements increase if `KEEP_TASK_FILES=1` is set (for debugging)
 
 ### GPU
+
 - **Not required**: The validator runs entirely on CPU
 - No GPU dependencies or CUDA requirements
-- All model inference is handled via third-party API calls (OpenAI, Anthropic, etc.)
+- All model inference is handled via third-party API calls (Chutes, OpenRouter, etc.)
 
 ### Third-Party API Requirements
 
-The validator requires API keys for model providers used by graders in the evaluation suite.
+Evaluating a skill challenge makes model-provider calls in two places: running the skill agent harness and running the LLM-as-judge graders. The validator (via `sbevals`) needs API keys for whichever providers the challenge's `suite.yaml` references.
 
-**Required API Keys**:
-- `OPENAI_API_KEY` - **Required** - For OpenAI models (GPT-4, GPT-3.5, etc.)
+**Most skill challenges run on Chutes or OpenRouter**, so prioritize those keys:
 
-**Optional API Keys**:
-- `ANTHROPIC_API_KEY` - For Anthropic models (Claude)
-- `GOOGLE_API_KEY` - For Google models (Gemini)
-- `OPENROUTER_API_KEY` - For OpenRouter (multi-provider access)
-- `TOGETHER_API_KEY` or `TOGETHERAI_API_KEY` - For Together AI models
-- `CHUTES_API_KEY` - For Chutes provider (OpenAI-compatible API)
+- `CHUTES_API_KEY` - Chutes provider (OpenAI-compatible API). Primary for most skill challenges.
+- `OPENROUTER_API_KEY` - OpenRouter (multi-provider access). Primary for most skill challenges.
+
+**Also supported** (set if a challenge's `suite.yaml` references them):
+
+- `OPENAI_API_KEY` - OpenAI models (GPT-4, GPT-5, etc.)
+- `ANTHROPIC_API_KEY` - Anthropic models (Claude)
+- `GOOGLE_API_KEY` - Google models (Gemini)
+- `TOGETHER_API_KEY` or `TOGETHERAI_API_KEY` - Together AI models
 - `GITHUB_TOKEN` - GitHub personal access token for authenticated API requests (increases rate limits, useful if evaluations need GitHub access)
 
-**Note**: The specific API keys needed depend on the graders configured in the challenge's `suite.yaml` file. The validator passes these keys to `letta-evals`, which selects the appropriate key based on the `provider` field in the suite configuration.
+**Note**: The specific keys you need depend on the challenge's `suite.yaml` (the `provider` field selects which key is used). Since most skill challenges use Chutes or OpenRouter, setting `CHUTES_API_KEY` and `OPENROUTER_API_KEY` covers the common case.
 
 **API Usage**:
-- API calls are made during task evaluation (not during agent execution)
-- Agent execution uses API keys configured on the Letta server (separate from validator API keys)
+
+- API calls happen during skill evaluation, in two places: running the skill agent harness (a test agent loaded with the `SKILL.md` makes LLM calls to produce outputs) and grading those outputs with LLM-as-judge graders
 - Rate limits depend on your API provider plan
 - Costs vary by provider and model used
 
+## Prerequisites: a registered SN121 validator hotkey
+
+A Bittensor wallet has two keys: a **coldkey** (holds your TAO and stake — keep it offline) and a **hotkey** (the operational key your validator signs with). The validator signs with the **hotkey**, which must be **registered on netuid 121 (finney mainnet) and hold a validator permit** before you start it — the validator never registers or stakes on-chain for you.
+
+Set this up once with `btcli`, following Bittensor's own guides (use **netuid 121** wherever they ask for the subnet):
+
+- [Wallets, coldkeys & hotkeys](https://docs.learnbittensor.org/keys/wallets) — create the wallet.
+- [Validating in Bittensor](https://docs.learnbittensor.org/validators) — register the hotkey and add the stake needed for a validator permit.
+
+This **hotkey** is what you give the validator — as `VALIDATOR_MNEMONIC` (its mnemonic), `HOTKEY_PATH` (the file at `~/.bittensor/wallets/<wallet>/hotkeys/<hotkey>`), or `PRIVATE_KEY`. The same key authenticates the coordinator API calls **and** signs the on-chain `setWeights` extrinsic — there is no separate weight-signing key. At weight-submission time the validator checks the metagraph and refuses if the hotkey isn't registered or lacks a permit.
+
 ## Quick Start
 
-There are two recommended ways to run the validator:
+Run the validator with the **unified Docker Compose** stack at the repo root. It starts the validator alongside the `sbevals` skill evaluator, so a single `docker compose up -d` gives you a working node. (The stack also brings up the dormant Letta backend for the legacy agent track; it needs no configuration from you. See [the note below](#about-the-dormant-letta-services).)
 
-- **Option A (recommended)**: Use the **unified Docker Compose** setup at the repo root to run **both Letta (our fork)** and the validator together.
-- **Option B**: Run the validator container by itself and point it at an existing Letta server (self-hosted).
-
-If you're not sure which to pick, **start with Option A**; it will run Letta and the validator for you with a single `docker compose up -d`.
-
-### Option A: Unified Docker Compose (Letta + Validator)
-
-**Recommended for most users.** This runs both Letta (our fork) and the validator together.
-
-#### Quick Start
+### Steps
 
 1. **Copy the example environment file:**
 
    ```bash
-   cd validator
    cp .env.example .env
    ```
 
 2. **Edit `.env` and configure:**
-   - Letta API keys (for agent execution), e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`
-   - Validator mnemonic: `VALIDATOR_MNEMONIC` (your existing **Bittensor validator hotkey**, 12-word phrase)
-   - Validator API URL: `API_URL` (coordinator endpoint, e.g., `https://api.sundaebar.ai/api/v2/validators`)
-   - Model provider API keys for graders (same keys used by Letta)
+
+   - Validator key: `VALIDATOR_MNEMONIC` (your existing **Bittensor validator hotkey**, 12-word phrase)
+   - Coordinator URL: `API_URL` (e.g., `https://api.sundaebar.ai/api/v2/validators`)
+   - Skill evaluator secret: `SBEVALS_API_KEY` (shared with the `sbevals` sidecar, see below)
+   - Model-provider keys for the skill harness and graders (most challenges use `CHUTES_API_KEY` or `OPENROUTER_API_KEY`)
 
 3. **Start all services:**
 
@@ -101,288 +119,183 @@ If you're not sure which to pick, **start with Option A**; it will run Letta and
 4. **View logs:**
 
    ```bash
-   # All services
-   docker compose logs -f
-   
-   # Just Letta
-   docker compose logs -f letta-server
-   
-   # Just Validator
-   docker compose logs -f validator
+   docker compose logs -f             # all services
+   docker compose logs -f validator   # just the validator
+   docker compose logs -f sbevals     # just the skill evaluator
    ```
 
-5. **Stop all services:**
+5. **Confirm health:**
+
+   ```bash
+   curl http://localhost:8080/health    # validator
+   curl http://localhost:8090/health    # sbevals
+   ```
+
+6. **Stop all services:**
 
    ```bash
    docker compose down
    ```
 
-#### What Gets Started
+### What Gets Started
 
-- **letta-db**: PostgreSQL database with pgvector extension
-- **letta-server**: Letta API server using our fork (`sundaebarai/letta:latest`) on ports 8083, 8283
-- **validator**: Validator service (`sundaebarai/sn121-validator:latest`) on port 8080, automatically configured to connect to Letta via `LETTA_BASE_URL=http://letta-server:8283`
-- **watchtower**: Optional auto-updater for images
+- **sbevals**: Skill evaluation service (`sundaebarai/sn121-skill-evals:latest`) on port 8090. This is what evaluates skill (`.md`) challenges. The validator reaches it at `http://sbevals:8090`.
+- **validator**: Validator service (`sundaebarai/sn121-validator:latest`) on port 8080 (health), automatically wired to `sbevals` (`SBEVALS_URL=http://sbevals:8090`).
+- **watchtower**: Auto-updater that keeps the `sn121-validator`, `sn121-sbevals`, and `sn121-letta` images current (polls every 5 minutes).
+- **letta-db** and **letta-server**: the dormant legacy agent backend. They start with default config and need no setup from you. See [the note below](#about-the-dormant-letta-services).
 
-#### Network
+### Network
 
-All services run on the same Docker network, so they can communicate using service names:
-- Validator connects to Letta via: `http://letta-server:8283`
-- No need for `host.docker.internal` when services are in the same compose file
+All services run on the same Docker network and reach each other by service name:
 
-#### Environment Variables
+- Validator → skill evaluator: `http://sbevals:8090`
+- No need for `host.docker.internal` when services share the compose file
+
+### About the dormant Letta services
+
+The default compose still launches `letta-db` and `letta-server` for the retired agent (`.af`) track. You do not need to set them up, provide Letta keys, or point anything at them to evaluate skill challenges. They are retained only so the agent track can be reactivated later. If you prefer not to run them at all, you can remove the `letta-db` and `letta-server` services (and the validator's `depends_on: letta-server`) from your local `docker-compose.yaml`.
+
+### Environment Variables
 
 The `.env` file is shared between all services. Key variables:
 
-**For Letta:**
-- `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc. (for agent execution)
-- `LETTA_PG_USER`, `LETTA_PG_PASSWORD`, `LETTA_PG_DB` (database config, defaults provided)
+**Validator:**
 
-**For Validator:**
 - One of the following key options (required):
   - `VALIDATOR_MNEMONIC`: 12-word BIP39 mnemonic
   - `HOTKEY_PATH`: Path to a Bittensor hotkey JSON file (mount via Docker volume)
   - `PRIVATE_KEY`: Raw private key / hex seed (`0x...`)
-- `API_URL`: Required – coordinator API endpoint
-- `LETTA_BASE_URL`: Automatically set to `http://letta-server:8283` in `docker-compose.yaml` (no need to configure)
-- Model provider API keys (for graders, same as Letta)
+- `API_URL`: Required — coordinator API endpoint
+- `SBEVALS_URL`: Automatically set to `http://sbevals:8090` in `docker-compose.yaml` (no need to configure)
 
-#### Building Images
+**Skill evaluator (`sbevals`):**
 
-If you need to rebuild the validator image:
+- `SBEVALS_API_KEY`: Shared secret between the validator and the `sbevals` sidecar. Compose passes the same value to the sidecar as `EVAL_SERVICE_API_KEY`, so set it once in `.env`.
+- `CHUTES_API_KEY`, `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc.: model-provider keys used to run the skill agent harness and the LLM-as-judge graders. Most skill challenges use Chutes or OpenRouter. The compose forwards all of them to `sbevals`; unset ones stay empty.
 
-```bash
-docker compose build validator
-```
+### Updating images
 
-The Letta image (`sundaebarai/letta:latest`) is pulled from Docker Hub and doesn't need to be built locally.
-
-### Option B: Standalone Validator (existing Letta server)
-
-#### 1. Configure Environment
-
-You'll need your **existing Bittensor validator key**. Three formats are supported.
-
-Copy `.env.example` to `.env`:
+`watchtower` keeps the images current automatically (it polls every 5 minutes), so you normally don't need to do anything. To force an update immediately:
 
 ```bash
-cp .env.example .env
+docker compose pull && docker compose up -d
 ```
 
-Edit `.env` and set **one** of the following key options:
-- `VALIDATOR_MNEMONIC`: Your 12-word BIP39 mnemonic (most common)
-- `HOTKEY_PATH`: Path to a Bittensor hotkey JSON file (e.g. `~/.bittensor/wallets/<wallet>/hotkeys/<hotkey>`) — reads `secretPhrase` from the file
-- `PRIVATE_KEY`: Raw private key / hex seed (`0x...`)
+### Building images
 
-Also set:
-- `API_URL`: Coordinator API URL (e.g., `https://api.sundaebar.ai/api/v2/validators`)
-- `LETTA_BASE_URL`: URL of your running Letta server (e.g., `http://localhost:8283` or `http://letta-server:8283`)
-
-#### 2. Run Locally
+The compose consumes the published images, so `docker compose build` does nothing. The `sundaebarai/sn121-validator`, `sundaebarai/sn121-skill-evals`, and `sundaebarai/letta` images are all pulled from Docker Hub. To build the validator image from source instead (maintainers):
 
 ```bash
-npm install
-npm run dev
+npm run docker:build     # multi-arch, tags :latest and :<package.json version>
+npm run docker:push      # build and push to Docker Hub
 ```
-
-#### 3. Build and Run with Docker
-
-**Using the deployment script:**
-
-```bash
-# Make script executable (first time only)
-chmod +x scripts/deploy.sh
-
-# Run deployment script
-./scripts/deploy.sh
-```
-
-The script will:
-- Check that `.env` file exists and is configured
-- Build the Docker image (`sundae-bar-validator:latest`)
-- Optionally run the container
-
-**Or use manual Docker commands:**
-
-```bash
-# Build image
-docker build -t sundae-bar-validator:latest .
-
-# Run with environment variables
-docker run --rm --env-file .env -p 8080:8080 sundae-bar-validator:latest
-```
-
-Or with inline environment variables:
-
-```bash
-# Note: Use host.docker.internal for Mac/Windows, or your host IP for Linux
-docker run --rm \
-  -e VALIDATOR_MNEMONIC="your mnemonic here" \
-  -e API_URL="http://host.docker.internal:3002/api/v2/validators" \
-  -e LETTA_BASE_URL="http://host.docker.internal:8283" \
-  -e DISPLAY_NAME="My Validator" \
-  -e OPENAI_API_KEY="your-openai-key" \
-  -e ANTHROPIC_API_KEY="your-anthropic-key" \
-  -e GITHUB_TOKEN="ghp_your_token" \
-  -e MAX_STEPS="10" \
-  -p 8080:8080 \
-  sundae-bar-validator:latest
-```
-
-**Important for Docker:** When running in Docker, `localhost` refers to the container, not your host machine. Use:
-- **Mac/Windows**: `host.docker.internal` (e.g., `http://host.docker.internal:3002/api/v2/validators`)
-- **Linux**: Your host machine's IP address or use `--network host`
-
-**Note:** The `API_URL` can include the full path (e.g., `http://host.docker.internal:3002/api/v2/validators`) or just the base URL (e.g., `http://host.docker.internal:3002`). The validator will automatically handle both formats.
-
-**Example with Local Letta Server:**
-
-```bash
-docker run --rm \
-  --env-file .env \
-  -e LETTA_BASE_URL="http://localhost:8283" \
-  -e OPENAI_API_KEY="sk-..." \
-  -e ANTHROPIC_API_KEY="sk-ant-..." \
-  sundae-bar-validator:latest
-```
-
 
 ## Configuration
 
 ### Environment Variables
 
 | Variable | Required | Default | Description |
-|----------|----------|---------|-------------|
+| --- | --- | --- | --- |
 | `VALIDATOR_MNEMONIC` | One of three required | - | 12-word BIP39 mnemonic. Used for validator identity and signing Bittensor weight transactions. |
 | `HOTKEY_PATH` | One of three required | - | Path to a Bittensor hotkey JSON file (reads `secretPhrase`). Mount via Docker volume when running in a container. |
 | `PRIVATE_KEY` | One of three required | - | Raw private key / hex seed (`0x...`). |
-| `API_URL` | Yes | - | Coordinator API URL. Can be base URL (e.g., `http://localhost:3002`) or full path (e.g., `http://localhost:3002/api/v2/validators`) |
-| `DISPLAY_NAME` | No | - | Validator display name |
-| `VERSION` | No | `1.0.1` | Validator version |
-| `POLL_INTERVAL` | No | `5` | Poll interval in seconds |
-| `HEARTBEAT_INTERVAL` | No | `30` | Heartbeat interval in seconds |
-| `MAX_RETRIES` | No | `3` | Max retries for failed requests |
-| `RETRY_DELAY` | No | `1000` | Retry delay in milliseconds |
-| `LOG_LEVEL` | No | `info` | Log level (trace, debug, info, warn, error, fatal) |
-| `WORK_DIR` | No | `/tmp/validator-work` | Working directory for task files |
-| `LETTA_BASE_URL` | Yes | - | Letta server URL (e.g., `http://localhost:8283`) |
-| `GITHUB_TOKEN` | No | - | GitHub personal access token for authenticated API requests (increases rate limits) |
-| `MAX_STEPS` | No | `10` | Maximum number of agent steps/tool calls per evaluation sample |
-| `BITTENSOR_WEIGHTS_INTERVAL_MINUTES` | No | `30` | Interval for fetching and submitting Bittensor weights (minutes) |
-| `BITTENSOR_WEIGHTS_DISABLED` | No | `false` | Set to `true` to disable on-chain weight submission (still fetches and logs) |
-| `BITTENSOR_VALIDATOR_SECRET` | No | - | **Deprecated**: Use `VALIDATOR_MNEMONIC` instead. Legacy support for backwards compatibility. |
-| `SERVER_PORT` | No | `8080` | HTTP server port for health checks |
-| `MAX_CONCURRENT_TASKS` | No | `1` | Maximum number of tasks to process concurrently |
-| `KEEP_TASK_FILES` | No | - | Set to `1` to keep task files after processing (for debugging) |
-| `LETTA_EMBEDDING_WAIT_MINUTES` | No | `30` | Maximum time to wait for file embeddings to complete |
-| `LETTA_EVALS_PYTHON` | No | `python3` | Python command to use for running letta-evals |
-| `LETTA_EVALS_MODULE` | No | `letta_evals.cli` | Python module to use for letta-evals CLI |
-| `LETTA_URL` | No | - | Alternative to `LETTA_BASE_URL` (deprecated, use `LETTA_BASE_URL`) |
-| `TOGETHERAI_API_KEY` | No | - | Alternative to `TOGETHER_API_KEY` for Together AI |
+| `API_URL` | Yes | - | Coordinator API URL (e.g., `https://api.sundaebar.ai/api/v2/validators`). Accepts a base URL or the full `…/api/v2/validators` path. Falls back to `http://localhost:3002` for local dev. |
+| `DISPLAY_NAME` | No | - | Validator display name reported on registration. |
+| `VERSION` | No | `1.0.0` | Validator version string reported to the coordinator. |
+| `POLL_INTERVAL` | No | `5` | Poll interval in seconds. |
+| `HEARTBEAT_INTERVAL` | No | `30` | Heartbeat interval in seconds. |
+| `MAX_RETRIES` | No | `3` | Max retries for failed coordinator requests. |
+| `RETRY_DELAY` | No | `1000` | Base retry delay in milliseconds (exponential backoff). |
+| `LOG_LEVEL` | No | `info` | Log level (`trace`, `debug`, `info`, `warn`, `error`, `fatal`). |
+| `WORK_DIR` | No | `/tmp/validator-work` | Working directory for per-task files. |
+| `SBEVALS_URL` | No | `http://localhost:8090` | Skill evaluator base URL. The unified compose sets this to `http://sbevals:8090`. |
+| `SBEVALS_API_KEY` | Yes | - | Sent as `X-Api-Key` to `sbevals`. **Must equal the sidecar's `EVAL_SERVICE_API_KEY`.** Compose keeps them in sync. |
+| `SBEVALS_POLL_INTERVAL_SECONDS` | No | `5` | How often the validator polls `sbevals` for a job result. |
+| `LETTA_EMBEDDING_WAIT_MINUTES` | No | `30` | Skill-task timeout in minutes (how long the validator waits for an `sbevals` job to finish). The legacy name is kept for backwards compatibility. |
+| `LETTA_BASE_URL` | No | - | Optional. Legacy agent (`.af`) track only; unused for skill challenges. When unset, the validator runs skill-only. The compose sets it for the dormant Letta backend. |
+| `SERVER_PORT` | No | `8080` | HTTP server port for health checks. |
+| `MAX_CONCURRENT_TASKS` | No | `1` | Maximum number of tasks to process concurrently. |
+| `KEEP_TASK_FILES` | No | - | Set to `1` to keep task files after processing (for debugging). |
+| `BITTENSOR_WEIGHTS_INTERVAL_MINUTES` | No | `30` | Interval for fetching and submitting Bittensor weights (minutes). |
+| `BITTENSOR_WEIGHTS_DISABLED` | No | `false` | Set to `true` to disable on-chain weight submission (still fetches and logs). |
+| `CHUTES_API_KEY` | No | - | Chutes provider key. Used by most skill challenges. |
+| `OPENROUTER_API_KEY` | No | - | OpenRouter key. Used by most skill challenges. |
+| `TOGETHERAI_API_KEY` | No | - | Alternative to `TOGETHER_API_KEY` for Together AI. |
+
+> `MNEMONIC` is accepted as a **deprecated** alias for `VALIDATOR_MNEMONIC`.
+
+### Skill track (`sbevals`) configuration
+
+Skill (`.md`) tasks are evaluated by the `sbevals` service over HTTP. The validator submits the task payload, then polls for the result.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `SBEVALS_URL` | `http://localhost:8090` | Skill evaluator base URL. The unified compose sets this to `http://sbevals:8090`. |
+| `SBEVALS_API_KEY` | — | Sent as `X-Api-Key` to `sbevals`. **Must equal the sidecar's `EVAL_SERVICE_API_KEY`.** Compose keeps them in sync. |
+| `SBEVALS_POLL_INTERVAL_SECONDS` | `5` | How often the validator polls `sbevals` for a job result. |
+
+**Note:** In the unified compose, `SBEVALS_API_KEY` (validator) and `EVAL_SERVICE_API_KEY` (sidecar) are populated from the same `.env` value, so they always match.
 
 ### Model Provider API Keys
 
-There are **two different uses** for API keys in the evaluation process:
+Evaluating a skill challenge uses model-provider keys in two places, both run by `sbevals`:
 
-#### 1. **Agent Execution** (Running the `.af` file)
+1. **Skill agent harness**: a test agent is loaded with the submitted `SKILL.md` and makes LLM calls to produce outputs.
+2. **LLM-as-judge graders**: the graders in `suite.yaml` score those outputs.
 
-The agent itself (defined in the `.af` file) specifies which model it uses. For example, an agent might be configured with:
-```json
-{
-  "llm_config": {
-    "model": "gpt-4.1-mini",
-    "provider_name": "openai",
-    "handle": "openai/gpt-4.1-mini"
-  }
-}
-```
+Set these keys in the **validator's** environment; the validator passes them through to `sbevals`. **Most skill challenges run on Chutes or OpenRouter**, so those are the keys to prioritize.
 
-**For Local Letta Server:**
-The Letta server needs API keys configured on the **server side** (not in the validator). When you start your local Letta server, set environment variables:
-```bash
-export OPENAI_API_KEY="sk-..."
-export ANTHROPIC_API_KEY="sk-ant-..."
-# etc.
-letta server
-```
+| Variable | Description |
+| --- | --- |
+| `CHUTES_API_KEY` | Chutes provider (OpenAI-compatible API). Primary for most skill challenges. |
+| `OPENROUTER_API_KEY` | OpenRouter (multi-provider access). Primary for most skill challenges. |
+| `OPENAI_API_KEY` | OpenAI models (GPT-4, GPT-5, etc.) |
+| `ANTHROPIC_API_KEY` | Anthropic models (Claude) |
+| `GOOGLE_API_KEY` | Google models (Gemini) |
+| `TOGETHER_API_KEY` | Together AI models (alternative: `TOGETHERAI_API_KEY`) |
+| `GITHUB_TOKEN` | GitHub personal access token (useful if evaluations need GitHub access) |
 
-#### 2. **Grading/Evaluation** (Model Judges)
-
-The graders in the suite.yaml use API keys passed to `letta-evals` by the validator. These are the API keys you set in the validator's environment:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `OPENAI_API_KEY` | **Yes** | OpenAI API key (for GPT grader models) - **Required** |
-| `ANTHROPIC_API_KEY` | No | Anthropic API key (for Claude grader models) |
-| `GOOGLE_API_KEY` | No | Google API key (for Gemini grader models) |
-| `OPENROUTER_API_KEY` | No | OpenRouter API key (for multi-provider access) |
-| `TOGETHER_API_KEY` | No | Together AI API key (alternative: `TOGETHERAI_API_KEY`) |
-| `CHUTES_API_KEY` | No | Chutes API key (for Chutes provider, OpenAI-compatible API) |
-| `GITHUB_TOKEN` | No | GitHub personal access token (passed to letta-evals, useful if evaluations need GitHub access) |
-
-**How Grader API Key Selection Works:**
-
-`letta-evals` determines which API key to use for graders based on the `provider` field in the suite configuration (suite.yaml):
+The evaluator picks the key based on the `provider` field in each grader's `suite.yaml` entry — and it can differ from one challenge to the next, so hold keys for every provider you expect to see:
 
 ```yaml
 graders:
   quality:
     kind: model_judge
-    model: gpt-5-mini        # Model name
-    provider: openai          # ← This determines which API key to use
+    model: deepseek-ai/DeepSeek-V3.1   # Model name
+    provider: chutes                    # ← This determines which API key to use
 ```
 
-When `provider: openai` is specified, `letta-evals` will use `OPENAI_API_KEY`. Similarly:
+- `provider: chutes` → uses `CHUTES_API_KEY`
+- `provider: openrouter` → uses `OPENROUTER_API_KEY`
 - `provider: openai` → uses `OPENAI_API_KEY`
 - `provider: anthropic` → uses `ANTHROPIC_API_KEY`
 - `provider: google` → uses `GOOGLE_API_KEY`
-- `provider: openrouter` → uses `OPENROUTER_API_KEY`
 - `provider: together` → uses `TOGETHER_API_KEY` or `TOGETHERAI_API_KEY`
-- `provider: chutes` → uses `CHUTES_API_KEY`
 
-**Summary:**
-- **Agent models**: Configured in the `.af` file, API keys needed on the **Letta server** (self-hosted)
-- **Grader models**: Configured in `suite.yaml` with `provider` field, API keys needed in the **validator** environment
-
-### Letta Configuration
-
-When running the validator standalone (Option B), you need to point it at an existing Letta server:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `LETTA_BASE_URL` | Yes | Letta server URL (e.g., `http://localhost:8283` for local, `http://letta-server:8283` for Docker Compose, or `https://your-letta-server.com` for remote) |
-
-**Note:** If using Option A (unified Docker Compose), `LETTA_BASE_URL` is automatically set to `http://letta-server:8283` and you don't need to configure it.
-
-
+> **Legacy:** the retired agent (`.af`) track ran the agent on a Letta server with model keys configured on that server. That path is dormant and needs no key setup to evaluate skill challenges.
 
 ## How It Works
 
 1. **Initialization**:
-   - Creates key pair from mnemonic
-   - Registers with coordinator using hotkey + signature
-   - Starts heartbeat loop
-   - Starts weights submission loop (if configured)
-
+   - Creates the key pair from the mnemonic
+   - Registers with the coordinator using hotkey + signature
+   - Starts the heartbeat loop
+   - Starts the weights submission loop (if configured)
 2. **Task Processing**:
-   - Polls coordinator for tasks (`GET /api/v2/validators/tasks?hotkey=...&status=queued`)
-   - Claims tasks and processes them
-   - Uploads files to Letta server
-   - Runs `letta-evals` with appropriate API keys
-   - Uploads raw evaluation output to coordinator
-   - Submits compact results back to coordinator
-   - Continues polling at configured interval
-
+   - Polls the coordinator for queued tasks (`POST /api/v2/validators/tasks/poll`, with status + limit in the request body)
+   - Claims the task
+   - **Evaluates the skill**: a skill task carries a `skill_file_path` (a `SKILL.md`), which the validator submits to `sbevals`, then polls for the result. (Tasks without a `skill_file_path` fall through to the dormant legacy agent path.)
+   - Uploads the raw evaluation output to the coordinator (for inspection)
+   - Submits the compact, scored result back to the coordinator
+   - Continues polling at the configured interval
 3. **Heartbeat**:
    - Sends periodic heartbeats to maintain online status
-   - Allows coordinator to track validator availability
-
+   - Allows the coordinator to track validator availability
 4. **Bittensor Weights**:
-   - Periodically fetches weights from coordinator based on leader performance
+   - Periodically fetches weights from the coordinator based on leader performance
    - Validates validator status on subnet 121
-   - Submits weights on-chain via `setWeights` extrinsic
+   - Submits weights on-chain via the `setWeights` extrinsic
    - Can be disabled with `BITTENSOR_WEIGHTS_DISABLED=true`
-
 5. **Error Handling**:
    - Automatic retries with exponential backoff
    - Network errors and 5xx responses are retried
@@ -391,38 +304,41 @@ When running the validator standalone (Option B), you need to point it at an exi
 
 ### Bittensor Weights Configuration
 
-The validator can submit weights to the Bittensor network based on leader performance:
+The validator submits weights to the Bittensor network based on leader performance:
 
 | Variable | Required | Description |
-|----------|----------|-------------|
+| --- | --- | --- |
 | `BITTENSOR_WEIGHTS_INTERVAL_MINUTES` | No | Interval for fetching weights (default: 30 minutes) |
 | `BITTENSOR_WEIGHTS_DISABLED` | No | Set to `true` to disable on-chain submission (still fetches and logs) |
-| `BITTENSOR_VALIDATOR_SECRET` | No | **Deprecated**: Use `VALIDATOR_MNEMONIC` instead |
 
-**Note:** `VALIDATOR_MNEMONIC` is used for both validator identity and signing Bittensor weight transactions. If `BITTENSOR_WEIGHTS_DISABLED` is not set to `true`, `VALIDATOR_MNEMONIC` is required.
+**Note:** `VALIDATOR_MNEMONIC` is used for both validator identity and signing Bittensor weight transactions. If `BITTENSOR_WEIGHTS_DISABLED` is not set to `true`, a validator key is required.
 
 **How it works:**
-- Fetches weights from coordinator API based on leader minutes in the time window
-- Validates that the validator account is registered on subnet 121
-- Converts floating-point weights (0.0-1.0) to u16 integers (0-65535)
-- Submits weights on-chain via Polkadot API
+
+- Fetches weights from the coordinator API based on leader minutes in the time window
+- Validates that the validator account is registered on subnet 121 and holds a validator permit
+- Converts the float weight targets to integer weights scaled so they sum to `10000` (each is range-checked against the u16 max of 65535)
+- Submits weights on-chain via the Polkadot API (`setWeights` on finney, netuid 121)
 - Logs detailed information about the submission process
 
 **Example:**
+
 ```bash
 docker run --rm \
   --env-file .env \
   -e VALIDATOR_MNEMONIC="your validator mnemonic here" \
   -e BITTENSOR_WEIGHTS_INTERVAL_MINUTES=30 \
   -p 8080:8080 \
-  sundae-bar-validator:latest
+  sundaebarai/sn121-validator:latest
 ```
+
+> The chain endpoint (`wss://entrypoint-finney.opentensor.ai:443`) and netuid (`121`) are hardcoded — there are no env vars for them.
 
 ## Security
 
-- **Non-root user**: Docker container runs as non-root user
+- **Non-root user**: Docker container runs as a non-root user
 - **Secure credentials**: Mnemonic and API keys should be stored securely (env vars, secrets manager)
-- **Signature verification**: All requests are signed with private key
+- **Signature verification**: All coordinator requests are signed with the validator key (sr25519)
 - **Timeout protection**: 30-second timeout on all API requests
 - **Error isolation**: Errors in one task don't affect others
 - **API key isolation**: Only required API keys are passed to child processes
@@ -433,7 +349,7 @@ docker run --rm \
 # Install dependencies
 npm install
 
-# Run in development mode
+# Run in development mode (ts-node)
 npm run dev
 
 # Build TypeScript
@@ -445,7 +361,7 @@ npm start
 
 ## Logging
 
-The validator uses structured logging with configurable levels. Log levels:
+The validator uses structured logging with configurable levels:
 
 - `trace`: Very detailed debugging
 - `debug`: Debug information
@@ -454,57 +370,67 @@ The validator uses structured logging with configurable levels. Log levels:
 - `error`: Errors
 - `fatal`: Fatal errors
 
-Set log level via `LOG_LEVEL` environment variable.
+Set the log level via the `LOG_LEVEL` environment variable.
 
 ## Health Endpoints
 
-The validator exposes HTTP endpoints for monitoring:
+The validator exposes HTTP endpoints for monitoring on port 8080 (configurable via `SERVER_PORT`):
 
-- `GET /health` - Basic health check
+- `GET /health` - Basic health check (`running` is the real liveness signal)
 - `GET /status` - Detailed validator status
 - `GET /metrics` - Memory and uptime metrics
 
-These endpoints are available on port 8080 by default (configurable via `SERVER_PORT`).
-
 ## Troubleshooting
 
-### "Mnemonic is required"
-- Make sure `VALIDATOR_MNEMONIC` environment variable is set
-- Check that mnemonic is valid (12 words)
-- Note: `MNEMONIC` is deprecated, use `VALIDATOR_MNEMONIC` instead
+### "No key configured"
 
-### "Failed to register evaluator"
-- Check that coordinator API is running
-- Verify `API_URL` is correct
+- Set one of `VALIDATOR_MNEMONIC` / `HOTKEY_PATH` / `PRIVATE_KEY`
+- Check that the mnemonic is valid (12 words) and you replaced the placeholder in `.env.example`
+- Note: `MNEMONIC` is a deprecated alias — prefer `VALIDATOR_MNEMONIC`
+
+### "Failed to register evaluator" / 404 "Validator not found"
+
+- Check that the coordinator API is reachable and `API_URL` is correct
+- Verify your hotkey is registered on subnet 121
 - Check network connectivity
 
 ### "No tasks available"
-- This is normal - validator will keep polling
-- Make sure briefs are being processed on coordinator
-- Verify evaluator is registered and online
+
+- This is normal — the validator will keep polling
+- Make sure submissions are being processed on the coordinator
+- Verify the validator is registered and online
 
 ### "Signature verification failed"
-- Check that mnemonic matches the registered hotkey
-- Verify coordinator is not in local bypass mode
+
+- Check that the mnemonic matches the registered hotkey
+- Verify the coordinator is not in local bypass mode
 
 ### "Failed to submit bittensor weights"
-- Verify `VALIDATOR_MNEMONIC` is set (same as your validator hotkey mnemonic)
-- Check that the account is registered as a validator on subnet 121
-- Ensure network connectivity to Bittensor entrypoint
-- Check logs for detailed error information
-- Note: `BITTENSOR_VALIDATOR_SECRET` is deprecated, use `VALIDATOR_MNEMONIC` instead
 
-### "Letta API error" or "502 Bad Gateway"
-- Verify `LETTA_BASE_URL` is correct and accessible
-- Check that Letta server is running
-- Ensure network connectivity between validator and Letta server
+- Verify `VALIDATOR_MNEMONIC` is set (the same hotkey mnemonic registered on subnet 121)
+- Check that the account is registered as a validator on subnet 121 and holds a validator permit
+- Ensure network connectivity to the Bittensor entrypoint
+- Check logs for detailed error information
+
+### `sbevals` errors or `401 Unauthorized`
+
+- Verify `SBEVALS_URL` is reachable from the validator (in compose this is `http://sbevals:8090`)
+- A `401` usually means `SBEVALS_API_KEY` does not match the sidecar's `EVAL_SERVICE_API_KEY`. In the unified compose both come from the same `.env` value, so check for a stale `.env` or an override.
+- Check the sidecar logs: `docker compose logs -f sbevals`
+- "polling timed out" means the job did not finish within `LETTA_EMBEDDING_WAIT_MINUTES`; check the sbevals logs for a stuck or failing grader (harness or judge)
+
+### Missing or wrong model key
+
+- A grader failed because the `provider` in `suite.yaml` has no matching key set. Most skill challenges use Chutes or OpenRouter, so make sure `CHUTES_API_KEY` / `OPENROUTER_API_KEY` are set.
+
+> The dormant Letta services are not involved in skill evaluation. If you see Letta errors in the logs, they come from the unused legacy backend and do not affect skill challenges.
 
 ## Architecture
 
 ```
 ┌─────────────┐      ┌──────────────┐      ┌─────────────┐
-│ Coordinator │◄─────┤   Validator   │──────►│ Letta Server│
-│    API      │      │              │      │             │
+│ Coordinator │◄─────┤   Validator  │──────►│   sbevals   │
+│    API      │      │              │      │ (skill eval)│
 └─────────────┘      └──────┬───────┘      └─────────────┘
                             │
                             ▼
@@ -517,4 +443,3 @@ These endpoints are available on port 8080 by default (configurable via `SERVER_
 ## License
 
 ISC
-
