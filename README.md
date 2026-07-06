@@ -16,7 +16,7 @@ Routing is automatic. If a task carries a `skill_file_path` (a `SKILL.md`), the 
 
 - ✅ **Secure Authentication**: Hotkey-based signature authentication
 - ✅ **Skill Evaluation**: Routes skill (`.md`) submissions to the `sbevals` evaluator and submits scores
-- ✅ **Bittensor Integration**: Submits weights to Bittensor subnet 121 based on leader performance
+- ✅ **Bittensor Integration**: Computes weights **locally** from public competition data (current #1 miner takes `EMISSIONS_PERCENT`, remainder burned to UID 0) and submits them to subnet 121 — no central weight server
 - ✅ **Robust Error Handling**: Comprehensive retry logic with exponential backoff
 - ✅ **Health Monitoring**: Automatic heartbeats and HTTP health endpoints
 - ✅ **Production Ready**: Dockerized, non-root user, health checks
@@ -216,8 +216,9 @@ npm run docker:push      # build and push to Docker Hub
 | `SERVER_PORT` | No | `8080` | HTTP server port for health checks. |
 | `MAX_CONCURRENT_TASKS` | No | `1` | Maximum number of tasks to process concurrently. |
 | `KEEP_TASK_FILES` | No | - | Set to `1` to keep task files after processing (for debugging). |
-| `BITTENSOR_WEIGHTS_INTERVAL_MINUTES` | No | `30` | Interval for fetching and submitting Bittensor weights (minutes). |
-| `BITTENSOR_WEIGHTS_DISABLED` | No | `false` | Set to `true` to disable on-chain weight submission (still fetches and logs). |
+| `EMISSIONS_PERCENT` | No | `0.2` | Share of weight paid to the current #1 miner; the rest is burned to UID 0 (`0.2` = 20% to the leader, 80% burned). |
+| `BITTENSOR_WEIGHTS_INTERVAL_MINUTES` | No | `30` | Interval for recomputing and submitting weights (minutes). Also recomputed immediately when a newly scored submission changes the standings. |
+| `BITTENSOR_WEIGHTS_DISABLED` | No | `false` | Set to `true` to disable on-chain weight submission (still computes and logs the target weights as a dry run). |
 | `CHUTES_API_KEY` | No | - | Chutes provider key. Used by most skill challenges. |
 | `OPENROUTER_API_KEY` | No | - | OpenRouter key. Used by most skill challenges. |
 | `TOGETHERAI_API_KEY` | No | - | Alternative to `TOGETHER_API_KEY` for Together AI. |
@@ -291,11 +292,13 @@ graders:
 3. **Heartbeat**:
    - Sends periodic heartbeats to maintain online status
    - Allows the coordinator to track validator availability
-4. **Bittensor Weights**:
-   - Periodically fetches weights from the coordinator based on leader performance
-   - Validates validator status on subnet 121
-   - Submits weights on-chain via the `setWeights` extrinsic
-   - Can be disabled with `BITTENSOR_WEIGHTS_DISABLED=true`
+4. **Bittensor Weights (decided locally, not fetched)**:
+   - The validator **decides weights itself** — it no longer asks the coordinator which weights to set.
+   - Each cycle it pulls the active competition + leaderboard from the coordinator (read-only **data**), deterministically selects the current **#1 miner by score**, resolves that miner's hotkey → metagraph UID, and sets weights: **`EMISSIONS_PERCENT` (default 20%) to the leader, the remaining ~80% burned to UID 0**.
+   - Recomputed on the periodic interval **and** immediately whenever a newly scored submission changes the standings.
+   - Over a competition's lifetime, whoever holds #1 the longest collects the most emissions — "time at the top takes all" emerges from continuously paying the current leader.
+   - If there is no active competition (or no eligible winner), 100% is burned to UID 0.
+   - Validates validator status on subnet 121, then submits on-chain via the `setWeights` extrinsic. Can be disabled (dry run) with `BITTENSOR_WEIGHTS_DISABLED=true`.
 5. **Error Handling**:
    - Automatic retries with exponential backoff
    - Network errors and 5xx responses are retried
@@ -304,22 +307,35 @@ graders:
 
 ### Bittensor Weights Configuration
 
-The validator submits weights to the Bittensor network based on leader performance:
+The validator **computes weights locally** from public competition data — the weight decision
+lives in the validator, not on a central server. This is the core of the subnet's
+decentralization: the coordinator is a **data source**, not the arbiter of emissions.
 
 | Variable | Required | Description |
 | --- | --- | --- |
-| `BITTENSOR_WEIGHTS_INTERVAL_MINUTES` | No | Interval for fetching weights (default: 30 minutes) |
-| `BITTENSOR_WEIGHTS_DISABLED` | No | Set to `true` to disable on-chain submission (still fetches and logs) |
+| `EMISSIONS_PERCENT` | No | Share of weight paid to the current #1 miner; the rest is burned to UID 0. `0.2` = 20% to the leader, 80% burned. (default: `0.2`) |
+| `BITTENSOR_WEIGHTS_INTERVAL_MINUTES` | No | How often to recompute + submit weights (default: 30 minutes). Weights are also recomputed immediately when a newly scored submission changes the standings. |
+| `BITTENSOR_WEIGHTS_DISABLED` | No | Set to `true` to disable on-chain submission (still computes and logs the target weights as a dry run) |
 
 **Note:** `VALIDATOR_MNEMONIC` is used for both validator identity and signing Bittensor weight transactions. If `BITTENSOR_WEIGHTS_DISABLED` is not set to `true`, a validator key is required.
 
 **How it works:**
 
-- Fetches weights from the coordinator API based on leader minutes in the time window
-- Validates that the validator account is registered on subnet 121 and holds a validator permit
-- Converts the float weight targets to integer weights scaled so they sum to `10000` (each is range-checked against the u16 max of 65535)
-- Submits weights on-chain via the Polkadot API (`setWeights` on finney, netuid 121)
-- Logs detailed information about the submission process
+- Pulls the active competition + leaderboard from the coordinator (`GET /api/v2/validators/competitions/active`) — read-only **data**, not a weight verdict.
+- Deterministically selects the current **#1 miner by score** (ties broken by earliest submission, then hotkey). The selection is pure and reproducible, so any validator running this code derives the same winner from the same data.
+- Resolves the winner's hotkey → metagraph UID on subnet 121 (via the `getMetagraph` runtime API).
+- Builds the weight vector: **`EMISSIONS_PERCENT` to the winner's UID, the remainder to UID 0 (burn)**. If there is no active competition or no eligible/resolvable winner, 100% is burned to UID 0.
+- Validates that the validator account is registered on subnet 121 and holds a validator permit.
+- Converts the float weights to integers scaled to sum to `10000` (range-checked against the u16 max of 65535) and submits on-chain via the Polkadot API (`setWeights` on finney, netuid 121).
+
+**Winner-takes-all over the competition lifetime:** because each cycle pays whoever is #1
+*right now*, the miner who holds the top spot the longest accumulates the most emissions —
+i.e. "time at the top takes all", with the rest burned.
+
+**Reproducibility:** after scoring a submission, the validator pushes the score back to the
+coordinator with a `sha256` integrity hash over the canonical scoring inputs (task, competition,
+miner/validator hotkeys, score, verdict, timestamp). The web app recomputes the same hash to
+verify the displayed leaderboard matches what the validator actually scored.
 
 **Example:**
 
@@ -327,6 +343,7 @@ The validator submits weights to the Bittensor network based on leader performan
 docker run --rm \
   --env-file .env \
   -e VALIDATOR_MNEMONIC="your validator mnemonic here" \
+  -e EMISSIONS_PERCENT=0.2 \
   -e BITTENSOR_WEIGHTS_INTERVAL_MINUTES=30 \
   -p 8080:8080 \
   sundaebarai/sn121-validator:latest
@@ -358,6 +375,28 @@ npm run build
 # Run production build
 npm start
 ```
+
+### Testing
+
+```bash
+# Unit tests for the deterministic weight logic (winner selection, the
+# EMISSIONS_PERCENT / burn split, and the integrity hash). No network or chain
+# access required.
+npm test
+
+# Dry-run the weight DECISION against a mock (or file-provided) leaderboard and
+# print the winner + weight targets, without a coordinator or a validator key:
+npm run dry-run:weights
+npm run dry-run:weights ./my-competition.json
+EMISSIONS_PERCENT=0.3 npm run dry-run:weights
+```
+
+For a full end-to-end dry run against the real coordinator without touching the
+chain, run the validator with `BITTENSOR_WEIGHTS_DISABLED=true` — it computes and
+logs the target weights every cycle but never submits `setWeights`.
+
+The coordinator-side API changes this validator depends on are specified in
+[`docs/coordinator-api-prd.md`](docs/coordinator-api-prd.md).
 
 ## Logging
 
