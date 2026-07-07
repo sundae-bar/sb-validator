@@ -376,9 +376,23 @@ Set the log level via the `LOG_LEVEL` environment variable.
 
 The validator exposes HTTP endpoints for monitoring on port 8080 (configurable via `SERVER_PORT`):
 
-- `GET /health` - Basic health check (`running` is the real liveness signal)
-- `GET /status` - Detailed validator status
-- `GET /metrics` - Memory and uptime metrics
+- `GET /health` - Cheap liveness check for container/platform healthchecks. Never probes dependencies, so a down sidecar can't restart the validator. `running` is the real liveness signal.
+- `GET /status` - Detailed validator status **plus live dependency checks** (see below)
+- `GET /metrics` - Memory, uptime, task counts, and dependency status/latency summary
+
+### Dependency checks on `/status`
+
+`/status` probes each external dependency and reports per-dependency `status`, `latencyMs`, a human-readable `message`, and a `hint` when something is wrong:
+
+| Dependency | Required | What is checked |
+| --- | --- | --- |
+| `sbevals` | Yes | `GET {SBEVALS_URL}/health` with the `X-Api-Key` header. Distinguishes **unreachable** (container down / wrong URL), **unauthorized** (`SBEVALS_API_KEY` ≠ sidecar's `EVAL_SERVICE_API_KEY`), and **degraded** (reachable but `SBEVALS_API_KEY` unset). |
+| `coordinator` | Yes | Reachability of `API_URL`. Since coordinator endpoints require signed requests, authenticated health is reported separately via `validator.lastHeartbeat` and `validator.lastPoll` (timestamp, ok/error of the most recent signed heartbeat and task poll). |
+| `letta` | No | `GET {LETTA_BASE_URL}/v1/health`. Reported as `disabled` when `LETTA_BASE_URL` is unset (skill-only mode). |
+
+Possible per-dependency statuses: `ok`, `degraded`, `unauthorized`, `unreachable`, `error`, `disabled`. The top-level `status` is `degraded` unless the validator is running and every **required** dependency is `ok` — so a glance at `/status` tells you whether skill submissions can currently succeed.
+
+Checks run in parallel with a 3s timeout (`DEPENDENCY_CHECK_TIMEOUT_MS`) and results are cached for 15s (`DEPENDENCY_CHECK_CACHE_SECONDS`), so `/status` and `/metrics` are safe to poll frequently.
 
 ## Troubleshooting
 
