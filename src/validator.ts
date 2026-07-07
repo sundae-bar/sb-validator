@@ -10,8 +10,32 @@ import { sleep } from './retry';
 import logger from './logger';
 import type { ValidatorConfig, Task } from './types';
 import { submitSn121Weights, resolveUids, normalizeToSs58, type BittensorWeightTarget } from './weights';
-import { selectCurrentLeader } from './leaderboard';
+import { selectCurrentLeader, type LeaderboardEntry } from './leaderboard';
 import { computeBurnWeights, getEmissionsPercent, BURN_UID } from './weight-policy';
+import { computeWeightDecisionHash } from './integrity';
+
+/**
+ * Snapshot of the most recent weight decision, exposed via GET /competition so
+ * anyone can see what the validator is currently voting with and verify the
+ * decision hash against a replay of the same leaderboard data.
+ */
+export interface WeightDecisionSnapshot {
+  at: string;
+  reason: 'interval' | 'event' | 'startup';
+  competition: {
+    competition_id: string;
+    window_start: string;
+    window_end: string;
+    entries_count: number;
+  } | null;
+  leader: LeaderboardEntry | null;
+  winnerUid: number | null;
+  emissionsPercent: number;
+  targets: BittensorWeightTarget[] | null;
+  decisionHash: string | null;
+  submitted: boolean;
+  error: string | null;
+}
 
 export class Validator {
   private config: ValidatorConfig;
@@ -26,6 +50,11 @@ export class Validator {
   // that arrives mid-cycle is coalesced into exactly one trailing re-run.
   private weightUpdateRunning: boolean = false;
   private weightUpdatePending: boolean = false;
+  // Observability for GET /competition: what the validator last voted with,
+  // when it last landed on-chain, and when the next interval tick fires.
+  private lastWeightDecision: WeightDecisionSnapshot | null = null;
+  private lastSetAt: string | null = null;
+  private nextSetAt: string | null = null;
   private startedAt: string | null = null;
   private lastHeartbeat: { at: string; ok: boolean; error?: string } | null = null;
   private lastPoll: { at: string; ok: boolean; tasksFound?: number; error?: string } | null = null;
@@ -188,15 +217,45 @@ export class Validator {
           const comp = await this.apiClient.fetchActiveCompetition();
           const leader = selectCurrentLeader(comp);
 
+          let leaderSs58: string | null = null;
           let winnerUid: number | null = null;
           if (leader) {
-            const ss58 = normalizeToSs58(leader.miner_hotkey);
-            const uidMap = await resolveUids([ss58]);
-            winnerUid = uidMap.get(ss58) ?? null;
+            leaderSs58 = normalizeToSs58(leader.miner_hotkey);
+            const uidMap = await resolveUids([leaderSs58]);
+            winnerUid = uidMap.get(leaderSs58) ?? null;
           }
 
           const emissionsPercent = getEmissionsPercent();
           const targets: BittensorWeightTarget[] = computeBurnWeights(winnerUid, emissionsPercent);
+          const decisionHash = computeWeightDecisionHash({
+            competition_id: comp?.competition_id ?? null,
+            leader_hotkey: leaderSs58,
+            leader_score: leader?.best_score ?? null,
+            winner_uid: winnerUid,
+            emissions_percent: emissionsPercent,
+            targets,
+          });
+
+          const snapshot: WeightDecisionSnapshot = {
+            at: new Date().toISOString(),
+            reason,
+            competition: comp
+              ? {
+                  competition_id: comp.competition_id,
+                  window_start: comp.window_start,
+                  window_end: comp.window_end,
+                  entries_count: comp.entries?.length ?? 0,
+                }
+              : null,
+            leader,
+            winnerUid,
+            emissionsPercent,
+            targets,
+            decisionHash,
+            submitted: false,
+            error: null,
+          };
+          this.lastWeightDecision = snapshot;
 
           logger.info(
             {
@@ -208,6 +267,7 @@ export class Validator {
               emissionsPercent,
               burnUid: BURN_UID,
               targets,
+              decisionHash,
               burningAll: winnerUid === null,
             },
             winnerUid === null
@@ -226,6 +286,8 @@ export class Validator {
             const submitStart = Date.now();
             try {
               await submitSn121Weights(targets, { validatorSecret: this.config.mnemonic });
+              snapshot.submitted = true;
+              this.lastSetAt = new Date().toISOString();
               logger.info(
                 {
                   reason,
@@ -236,10 +298,12 @@ export class Validator {
                 'Successfully submitted weights on-chain',
               );
             } catch (submitError) {
+              snapshot.error =
+                submitError instanceof Error ? submitError.message : String(submitError);
               logger.error(
                 {
                   reason,
-                  error: submitError instanceof Error ? submitError.message : String(submitError),
+                  error: snapshot.error,
                   errorStack: submitError instanceof Error ? submitError.stack : undefined,
                 },
                 'Failed to submit weights on-chain via setWeights',
@@ -247,6 +311,20 @@ export class Validator {
             }
           }
         } catch (error) {
+          // Fetch/resolve failed before a decision could be computed — record
+          // the failure so GET /competition shows why there's no fresh vote.
+          this.lastWeightDecision = {
+            at: new Date().toISOString(),
+            reason,
+            competition: null,
+            leader: null,
+            winnerUid: null,
+            emissionsPercent: getEmissionsPercent(),
+            targets: null,
+            decisionHash: null,
+            submitted: false,
+            error: error instanceof Error ? error.message : String(error),
+          };
           logger.error(
             {
               reason,
@@ -278,7 +356,11 @@ export class Validator {
     // first interval elapses.
     void this.runWeightCycle('startup');
 
+    this.nextSetAt = new Date(Date.now() + interval).toISOString();
     this.weightsInterval = setInterval(() => {
+      // Event cycles don't shift the schedule — the next interval tick is
+      // always one interval after the previous tick.
+      this.nextSetAt = new Date(Date.now() + interval).toISOString();
       void this.runWeightCycle('interval');
     }, interval);
 
@@ -292,8 +374,32 @@ export class Validator {
     if (this.weightsInterval) {
       clearInterval(this.weightsInterval);
       this.weightsInterval = null;
+      this.nextSetAt = null;
       logger.info('Weight loop stopped');
     }
+  }
+
+  /**
+   * Current weight-vote state for GET /competition: what the validator last
+   * decided (targets + decision hash), when weights last landed on-chain, and
+   * when the next interval tick fires.
+   */
+  getWeightsStatus(): {
+    enabled: boolean;
+    intervalMinutes: number;
+    emissionsPercent: number;
+    lastDecision: WeightDecisionSnapshot | null;
+    lastSetAt: string | null;
+    nextSetAt: string | null;
+  } {
+    return {
+      enabled: process.env.BITTENSOR_WEIGHTS_DISABLED !== 'true',
+      intervalMinutes: this.config.weightsInterval || 30,
+      emissionsPercent: getEmissionsPercent(),
+      lastDecision: this.lastWeightDecision,
+      lastSetAt: this.lastSetAt,
+      nextSetAt: this.nextSetAt,
+    };
   }
 
   /**

@@ -1,6 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { canonicalize, computeIntegrityHash, type ScoringIntegrityInput } from '../src/integrity';
+import {
+  canonicalize,
+  computeIntegrityHash,
+  computeWeightDecisionHash,
+  type ScoringIntegrityInput,
+  type WeightDecisionInput,
+} from '../src/integrity';
 
 test('canonicalize is key-order independent', () => {
   assert.equal(
@@ -42,4 +48,50 @@ test('computeIntegrityHash changes when any field changes', () => {
   assert.notEqual(base, computeIntegrityHash({ ...baseInput, verdict: 'failed' }));
   assert.notEqual(base, computeIntegrityHash({ ...baseInput, miner_hotkey: '5Fother' }));
   assert.notEqual(base, computeIntegrityHash({ ...baseInput, timestamp: '2026-07-06T00:00:01.000Z' }));
+});
+
+const baseDecision: WeightDecisionInput = {
+  competition_id: 'comp-1',
+  leader_hotkey: '5Fleader',
+  leader_score: 0.91,
+  winner_uid: 42,
+  emissions_percent: 0.2,
+  targets: [
+    { uid: 42, weight: 0.2 },
+    { uid: 0, weight: 0.8 },
+  ],
+};
+
+test('computeWeightDecisionHash is stable and sha256-prefixed', () => {
+  const h1 = computeWeightDecisionHash(baseDecision);
+  const h2 = computeWeightDecisionHash({ ...baseDecision, targets: [...baseDecision.targets] });
+  assert.equal(h1, h2);
+  assert.match(h1, /^sha256:[0-9a-f]{64}$/);
+});
+
+test('computeWeightDecisionHash changes when any field changes', () => {
+  const base = computeWeightDecisionHash(baseDecision);
+  assert.notEqual(base, computeWeightDecisionHash({ ...baseDecision, winner_uid: 43 }));
+  assert.notEqual(base, computeWeightDecisionHash({ ...baseDecision, emissions_percent: 0.3 }));
+  assert.notEqual(base, computeWeightDecisionHash({ ...baseDecision, leader_score: 0.92 }));
+  assert.notEqual(
+    base,
+    computeWeightDecisionHash({
+      ...baseDecision,
+      targets: [{ uid: 42, weight: 0.3 }, { uid: 0, weight: 0.7 }],
+    }),
+  );
+});
+
+test('computeWeightDecisionHash handles the burn-only decision', () => {
+  const burn = computeWeightDecisionHash({
+    competition_id: null,
+    leader_hotkey: null,
+    leader_score: null,
+    winner_uid: null,
+    emissions_percent: 0.2,
+    targets: [{ uid: 0, weight: 1 }],
+  });
+  assert.match(burn, /^sha256:[0-9a-f]{64}$/);
+  assert.notEqual(burn, computeWeightDecisionHash(baseDecision));
 });

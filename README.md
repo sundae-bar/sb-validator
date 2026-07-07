@@ -418,6 +418,32 @@ The validator exposes HTTP endpoints for monitoring on port 8080 (configurable v
 - `GET /health` - Cheap liveness check for container/platform healthchecks. Never probes dependencies, so a down sidecar can't restart the validator. `running` is the real liveness signal.
 - `GET /status` - Detailed validator status **plus live dependency checks** (see below)
 - `GET /metrics` - Memory, uptime, task counts, and dependency status/latency summary
+- `GET /competition` - The current competition and the validator's **weight vote**: the targets it's using (winner + burn split), the leader it selected, a reproducible `decisionHash` (canonical-JSON sha256 over the decision fields — replay the same leaderboard through the public formula to verify), when weights last landed on-chain (`lastSetAt`), and when the next interval tick fires (`nextSetAt`)
+
+Example `/competition` response during an active competition:
+
+```json
+{
+  "competition": { "competition_id": "comp_2026_07", "window_start": "…", "window_end": "…", "entries_count": 12 },
+  "vote": {
+    "targets": [{ "uid": 42, "weight": 0.2 }, { "uid": 0, "weight": 0.8 }],
+    "winnerUid": 42,
+    "leader": { "miner_hotkey": "5F…", "best_score": 0.91, "submitted_at": "…" },
+    "emissionsPercent": 0.2,
+    "decisionHash": "sha256:…"
+  },
+  "weights": {
+    "enabled": true,
+    "intervalMinutes": 30,
+    "lastDecisionAt": "…",
+    "lastDecisionReason": "interval",
+    "submitted": true,
+    "error": null,
+    "lastSetAt": "…",
+    "nextSetAt": "…"
+  }
+}
+```
 
 ### Dependency checks on `/status`
 
