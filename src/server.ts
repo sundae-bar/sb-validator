@@ -1,12 +1,23 @@
 /**
  * HTTP server for health checks and status endpoints
- * 
+ *
  * Uses Express for a familiar, widely-used HTTP server
  */
 
 import express, { Express, Request, Response } from 'express';
 import { logger } from './logger';
+import { checkDependencies } from './dependency-checks';
 import type { Validator } from './validator';
+
+// Resolved at runtime so the endpoint reports the shipped package version
+// (a static import would emit package.json outside tsconfig's rootDir).
+let packageVersion = 'unknown';
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  packageVersion = require('../package.json').version;
+} catch {
+  packageVersion = process.env.VERSION || 'unknown';
+}
 
 export function createServer(validator: Validator): Express {
   const app = express();
@@ -14,40 +25,83 @@ export function createServer(validator: Validator): Express {
   // JSON middleware
   app.use(express.json());
 
-  // Health check endpoint
+  // Health check endpoint — intentionally cheap (no dependency probes) so
+  // container/platform healthchecks never restart the validator because a
+  // *dependency* is down. Use /status for dependency health.
   app.get('/health', (req: Request, res: Response) => {
     const status = validator.getStatus();
     res.json({
       status: 'ok',
       running: status.running,
+      uptime: Math.round(process.uptime()),
       timestamp: new Date().toISOString()
     });
   });
 
-  // Status endpoint with detailed info
-  app.get('/status', (req: Request, res: Response) => {
+  // Status endpoint with detailed info, including live dependency checks
+  // (sbevals sidecar, coordinator API, optional Letta backend)
+  app.get('/status', async (req: Request, res: Response) => {
     const status = validator.getStatus();
+    const report = await checkDependencies(status.apiUrl);
+
     res.json({
-      status: 'ok',
+      status: status.running && report.overall === 'ok' ? 'ok' : 'degraded',
       validator: {
         running: status.running,
         hotkey: status.hotkey,
         evaluatorId: status.evaluatorId,
-        apiUrl: status.apiUrl
+        apiUrl: status.apiUrl,
+        startedAt: status.startedAt,
+        uptimeSeconds: Math.round(process.uptime()),
+        // Authenticated coordinator health: heartbeats and task polls use
+        // signed requests, so these show whether the coordinator is actually
+        // accepting this validator (vs. the plain reachability probe below).
+        lastHeartbeat: status.lastHeartbeat,
+        lastPoll: status.lastPoll,
+        taskProcessor: status.taskProcessor
+      },
+      dependencies: {
+        overall: report.overall,
+        checkedAt: report.checkedAt,
+        cached: report.cached,
+        ...report.dependencies
       },
       timestamp: new Date().toISOString()
     });
   });
 
   // Metrics endpoint (for monitoring)
-  app.get('/metrics', (req: Request, res: Response) => {
+  app.get('/metrics', async (req: Request, res: Response) => {
     const status = validator.getStatus();
+    const report = await checkDependencies(status.apiUrl);
+
     res.json({
       validator: {
         running: status.running,
         hotkey: status.hotkey ? `${status.hotkey.substring(0, 10)}...` : 'unknown',
         evaluatorId: status.evaluatorId || 'not-registered',
-        apiUrl: status.apiUrl
+        apiUrl: status.apiUrl,
+        lastHeartbeat: status.lastHeartbeat,
+        lastPoll: status.lastPoll
+      },
+      tasks: {
+        processing: status.taskProcessor?.processing ?? 0,
+        maxConcurrent: status.taskProcessor?.maxConcurrent ?? 0
+      },
+      dependencies: {
+        overall: report.overall,
+        sbevals: {
+          status: report.dependencies.sbevals.status,
+          latencyMs: report.dependencies.sbevals.latencyMs
+        },
+        coordinator: {
+          status: report.dependencies.coordinator.status,
+          latencyMs: report.dependencies.coordinator.latencyMs
+        },
+        letta: {
+          status: report.dependencies.letta.status,
+          latencyMs: report.dependencies.letta.latencyMs
+        }
       },
       uptime: process.uptime(),
       memory: {
@@ -63,11 +117,16 @@ export function createServer(validator: Validator): Express {
   app.get('/', (req: Request, res: Response) => {
     res.json({
       service: 'Sundae Bar Validator',
-      version: '1.0.0',
+      version: packageVersion,
       endpoints: {
-        health: '/health',
-        status: '/status',
-        metrics: '/metrics'
+        health: '/health — process liveness only (used by container healthchecks)',
+        status: '/status — validator state + live dependency checks (sbevals, coordinator, letta)',
+        metrics: '/metrics — uptime, memory, task counts, dependency latencies'
+      },
+      dependencies: {
+        sbevals: 'skill evaluation sidecar (required for skill challenges)',
+        coordinator: 'Sundae Bar coordinator API (required)',
+        letta: 'legacy agent backend (optional, dormant)'
       }
     });
   });
@@ -111,4 +170,3 @@ export async function startServer(
     }
   });
 }
-

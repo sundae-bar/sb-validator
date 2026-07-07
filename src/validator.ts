@@ -26,6 +26,9 @@ export class Validator {
   // that arrives mid-cycle is coalesced into exactly one trailing re-run.
   private weightUpdateRunning: boolean = false;
   private weightUpdatePending: boolean = false;
+  private startedAt: string | null = null;
+  private lastHeartbeat: { at: string; ok: boolean; error?: string } | null = null;
+  private lastPoll: { at: string; ok: boolean; tasksFound?: number; error?: string } | null = null;
 
   constructor(config: ValidatorConfig) {
     this.config = {
@@ -118,9 +121,12 @@ export class Validator {
       if (this.apiClient && this.running) {
         try {
           await this.apiClient.heartbeat(this.config.version, this.config.capacity);
+          this.lastHeartbeat = { at: new Date().toISOString(), ok: true };
         } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          this.lastHeartbeat = { at: new Date().toISOString(), ok: false, error: message };
           logger.error(
-            { error: error instanceof Error ? error.message : String(error) },
+            { error: message },
             'Heartbeat failed (will retry on next interval)'
           );
         }
@@ -334,6 +340,11 @@ export class Validator {
 
         // Poll for tasks
         const response = await this.apiClient.pollTasks('queued', 10);
+        this.lastPoll = {
+          at: new Date().toISOString(),
+          ok: true,
+          tasksFound: response.tasks?.length || 0
+        };
 
         // Reset error counter on success
         consecutiveErrors = 0;
@@ -379,6 +390,7 @@ export class Validator {
       } catch (error) {
         consecutiveErrors++;
         const errorMessage = error instanceof Error ? error.message : String(error);
+        this.lastPoll = { at: new Date().toISOString(), ok: false, error: errorMessage };
 
         if (consecutiveErrors >= maxConsecutiveErrors) {
           logger.error(
@@ -424,6 +436,7 @@ export class Validator {
       }
 
       this.running = true;
+      this.startedAt = new Date().toISOString();
       logger.info('Validator started and running continuously');
 
       // Start heartbeat
@@ -464,6 +477,9 @@ export class Validator {
     hotkey: string;
     evaluatorId: string | null;
     apiUrl: string;
+    startedAt: string | null;
+    lastHeartbeat: { at: string; ok: boolean; error?: string } | null;
+    lastPoll: { at: string; ok: boolean; tasksFound?: number; error?: string } | null;
     taskProcessor?: {
       processing: number;
       maxConcurrent: number;
@@ -475,6 +491,9 @@ export class Validator {
       hotkey: this.hotkey,
       evaluatorId: this.evaluatorId,
       apiUrl: this.config.apiUrl,
+      startedAt: this.startedAt,
+      lastHeartbeat: this.lastHeartbeat,
+      lastPoll: this.lastPoll,
       taskProcessor: this.taskProcessor?.getStatus()
     };
   }
