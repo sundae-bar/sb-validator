@@ -83,3 +83,36 @@ export const computeIntegrityHash = (input: ScoringIntegrityInput): string => {
     const hex = createHash('sha256').update(canonical, 'utf8').digest('hex');
     return `sha256:${hex}`;
 };
+
+/**
+ * The fields covered by the weight-decision hash. Deliberately excludes
+ * timestamps so identical decisions hash identically — anyone replaying the
+ * same leaderboard data through the public formula reproduces the same hash
+ * and can compare it against what the validator reports (GET /competition).
+ */
+export interface WeightDecisionInput {
+    competition_id: string | null;
+    /** SS58-normalized leader hotkey; null when burning 100%. */
+    leader_hotkey: string | null;
+    leader_score: number | null;
+    winner_uid: number | null;
+    emissions_percent: number;
+    targets: { uid: number; weight: number }[];
+}
+
+/**
+ * Compute the hash of a weight decision: `sha256:<hex>` over the canonical
+ * JSON of the decision fields.
+ */
+export const computeWeightDecisionHash = (input: WeightDecisionInput): string => {
+    const canonical = canonicalize({
+        competition_id: input.competition_id,
+        leader_hotkey: input.leader_hotkey,
+        leader_score: input.leader_score,
+        winner_uid: input.winner_uid,
+        emissions_percent: input.emissions_percent,
+        targets: input.targets.map((t) => ({ uid: t.uid, weight: t.weight })),
+    });
+    const hex = createHash('sha256').update(canonical, 'utf8').digest('hex');
+    return `sha256:${hex}`;
+};

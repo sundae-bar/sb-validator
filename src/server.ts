@@ -113,6 +113,41 @@ export function createServer(validator: Validator): Express {
     });
   });
 
+  // Current competition + the validator's weight vote. Shows what the
+  // validator last decided (targets + reproducible decision hash), when
+  // weights last landed on-chain, and when the next interval tick fires —
+  // so the local weight decision is observable and verifiable from outside.
+  app.get('/competition', (req: Request, res: Response) => {
+    const w = validator.getWeightsStatus();
+    const d = w.lastDecision;
+
+    res.json({
+      competition: d?.competition ?? null,
+      vote: d && d.targets
+        ? {
+            targets: d.targets,
+            winnerUid: d.winnerUid,
+            leader: d.leader,
+            emissionsPercent: d.emissionsPercent,
+            decisionHash: d.decisionHash
+          }
+        : null,
+      weights: {
+        enabled: w.enabled,
+        intervalMinutes: w.intervalMinutes,
+        emissionsPercent: w.emissionsPercent,
+        lastDecisionAt: d?.at ?? null,
+        lastDecisionReason: d?.reason ?? null,
+        submitted: d?.submitted ?? false,
+        error: d?.error ?? null,
+        lastSetAt: w.lastSetAt,
+        nextSetAt: w.nextSetAt
+      },
+      ...(d ? {} : { note: 'No weight cycle has completed yet — check again shortly.' }),
+      timestamp: new Date().toISOString()
+    });
+  });
+
   // Root endpoint
   app.get('/', (req: Request, res: Response) => {
     res.json({
@@ -121,7 +156,8 @@ export function createServer(validator: Validator): Express {
       endpoints: {
         health: '/health — process liveness only (used by container healthchecks)',
         status: '/status — validator state + live dependency checks (sbevals, coordinator, letta)',
-        metrics: '/metrics — uptime, memory, task counts, dependency latencies'
+        metrics: '/metrics — uptime, memory, task counts, dependency latencies',
+        competition: '/competition — current competition + the validator\'s weight vote (targets, decision hash, last/next set time)'
       },
       dependencies: {
         sbevals: 'skill evaluation sidecar (required for skill challenges)',
