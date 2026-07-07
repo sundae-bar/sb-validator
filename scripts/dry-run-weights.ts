@@ -27,9 +27,21 @@ const SAMPLE: ActiveCompetition = {
   window_start: '2026-07-01T00:00:00.000Z',
   window_end: '2026-08-01T00:00:00.000Z',
   entries: [
-    { miner_hotkey: '5AliceHotkey', best_score: 0.71, submitted_at: '2026-07-02T09:00:00.000Z' },
-    { miner_hotkey: '5BobHotkey', best_score: 0.88, submitted_at: '2026-07-03T14:00:00.000Z' },
-    { miner_hotkey: '5CarolHotkey', best_score: 0.88, submitted_at: '2026-07-03T10:00:00.000Z' },
+    {
+      miner_hotkey: '5AliceHotkey',
+      best_score: 0.71,
+      submitted_at: '2026-07-02T09:00:00.000Z',
+    },
+    {
+      miner_hotkey: '5BobHotkey',
+      best_score: 0.88,
+      submitted_at: '2026-07-03T14:00:00.000Z',
+    },
+    {
+      miner_hotkey: '5CarolHotkey',
+      best_score: 0.88,
+      submitted_at: '2026-07-03T10:00:00.000Z',
+    },
   ],
 };
 
@@ -50,23 +62,29 @@ const main = (): void => {
   const winnerUid = leader ? PLACEHOLDER_WINNER_UID : null;
   const targets = computeBurnWeights(winnerUid, emissionsPercent);
 
-  console.log(JSON.stringify(
-    {
-      competition_id: comp?.competition_id ?? null,
-      emissionsPercent,
-      burnUid: BURN_UID,
-      leader: leader
-        ? { miner_hotkey: leader.miner_hotkey, best_score: leader.best_score, submitted_at: leader.submitted_at }
-        : null,
-      note: leader
-        ? `winner UID is a placeholder (${PLACEHOLDER_WINNER_UID}); real UID is resolved from the metagraph at runtime`
-        : 'no eligible winner — burning 100% to UID 0',
-      targets,
-      weightSum: targets.reduce((s, t) => s + t.weight, 0),
-    },
-    null,
-    2,
-  ));
+  console.log(
+    JSON.stringify(
+      {
+        competition_id: comp?.competition_id ?? null,
+        emissionsPercent,
+        burnUid: BURN_UID,
+        leader: leader
+          ? {
+              miner_hotkey: leader.miner_hotkey,
+              best_score: leader.best_score,
+              submitted_at: leader.submitted_at,
+            }
+          : null,
+        note: leader
+          ? `winner UID is a placeholder (${PLACEHOLDER_WINNER_UID}); real UID is resolved from the metagraph at runtime`
+          : 'no eligible winner — burning 100% to UID 0',
+        targets,
+        weightSum: targets.reduce((s, t) => s + t.weight, 0),
+      },
+      null,
+      2,
+    ),
+  );
 };
 
 main();

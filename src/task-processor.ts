@@ -1,6 +1,6 @@
 /**
  * Task processor - handles task execution with idempotency
- * 
+ *
  * Features:
  * - Claims tasks before processing (prevents duplicate processing)
  * - In-memory tracking to avoid processing same task twice
@@ -59,17 +59,18 @@ export class TaskProcessor {
     apiClient: ApiClient,
     workDir: string = '/tmp/validator-work',
     maxConcurrentTasks: number = 1,
-    pair?: KeyringPair
+    pair?: KeyringPair,
   ) {
     this.apiClient = apiClient;
     this.pair = pair ?? null;
     this.workDir = workDir;
     this.maxConcurrentTasks = maxConcurrentTasks;
     const intervalMinutes = Number(process.env.BITTENSOR_WEIGHTS_INTERVAL_MINUTES || '30');
-    this.weightsIntervalMs = Number.isFinite(intervalMinutes) && intervalMinutes > 0
-      ? intervalMinutes * 60_000
-      : 30 * 60_000;
-    
+    this.weightsIntervalMs =
+      Number.isFinite(intervalMinutes) && intervalMinutes > 0
+        ? intervalMinutes * 60_000
+        : 30 * 60_000;
+
     // Initialize Letta client if base URL is available
     const lettaBaseUrl = process.env.LETTA_BASE_URL?.trim().replace(/^["']|["']$/g, '');
     if (lettaBaseUrl) {
@@ -78,7 +79,7 @@ export class TaskProcessor {
       } catch (error) {
         logger.warn(
           { error: error instanceof Error ? error.message : String(error) },
-          'Failed to initialize Letta client (file uploads will be disabled)'
+          'Failed to initialize Letta client (file uploads will be disabled)',
         );
       }
     }
@@ -105,7 +106,7 @@ export class TaskProcessor {
   private markProcessing(taskId: string): void {
     this.processingTasks.set(taskId, {
       taskId,
-      startedAt: new Date()
+      startedAt: new Date(),
     });
   }
 
@@ -139,8 +140,12 @@ export class TaskProcessor {
     // Concurrency check
     if (!this.canProcessMore()) {
       logger.info(
-        { taskId, current: this.processingTasks.size, max: this.maxConcurrentTasks },
-        'Max concurrent tasks reached, skipping'
+        {
+          taskId,
+          current: this.processingTasks.size,
+          max: this.maxConcurrentTasks,
+        },
+        'Max concurrent tasks reached, skipping',
       );
       return;
     }
@@ -158,13 +163,13 @@ export class TaskProcessor {
         logger.info({ taskId }, 'Task claimed successfully');
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        
+
         // If task is already claimed/processing, that's okay (idempotent)
         if (errorMessage.includes('already claimed') || errorMessage.includes('not available')) {
           logger.info({ taskId }, 'Task already claimed by another process, skipping');
           return;
         }
-        
+
         // Other errors should be thrown
         throw error;
       }
@@ -195,8 +200,11 @@ export class TaskProcessor {
         files = await this.prepareFiles(taskPayload, taskWorkDir);
       } catch (error) {
         logger.error(
-          { taskId, error: error instanceof Error ? error.message : String(error) },
-          'Failed to prepare task files'
+          {
+            taskId,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          'Failed to prepare task files',
         );
         throw error;
       }
@@ -235,7 +243,7 @@ export class TaskProcessor {
       if (files.datasetPath) {
         try {
           const datasetContent = await fs.readFile(files.datasetPath, 'utf-8');
-          const lines = datasetContent.split('\n').filter(line => line.trim());
+          const lines = datasetContent.split('\n').filter((line) => line.trim());
           lines.forEach((line, index) => {
             try {
               const sample = JSON.parse(line);
@@ -287,7 +295,7 @@ export class TaskProcessor {
               datasetIdMapSize: datasetIdMap.size,
               datasetMetaCount: datasetMetaById.size,
             },
-            'Loaded dataset ID and metadata mapping'
+            'Loaded dataset ID and metadata mapping',
           );
         } catch (error) {
           logger.warn(
@@ -302,8 +310,7 @@ export class TaskProcessor {
       }
 
       // Helper to round scores to 5 decimal places
-      const roundScore = (value: number) =>
-        Math.round(value * 100_000) / 100_000;
+      const roundScore = (value: number) => Math.round(value * 100_000) / 100_000;
 
       // Step 4: Extract score from summary
       let score: number | undefined = undefined;
@@ -333,58 +340,56 @@ export class TaskProcessor {
       // We trim down the data to avoid sending large payloads:
       // - results: [{ id, score, rationale, tokens }]
       // - total_score, total_tests, duration_seconds, total_tokens, keys
-      const compactResults =
-        Array.isArray(evaluationResult.results) ?
-          evaluationResult.results.map((result: unknown, index: number) => {
-            if (typeof result !== 'object' || result === null) {
-              return null;
-            }
+      const compactResults = Array.isArray(evaluationResult.results)
+        ? (evaluationResult.results
+            .map((result: unknown, index: number) => {
+              if (typeof result !== 'object' || result === null) {
+                return null;
+              }
 
-            const resultObj = result as Record<string, any>;
-            const resultData = resultObj.result as Record<string, any> | undefined;
-            if (!resultData) {
-              return null;
-            }
+              const resultObj = result as Record<string, any>;
+              const resultData = resultObj.result as Record<string, any> | undefined;
+              if (!resultData) {
+                return null;
+              }
 
-            const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
-            const performance = resultData.performance as { total_tokens?: number } | undefined;
+              const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
+              const performance = resultData.performance as { total_tokens?: number } | undefined;
 
-            // Try to get ID from result object, then from dataset mapping, then fallback to index
-            const id =
-              resultObj.id ??
-              resultObj.sample_id ??
-              resultObj.task_id ??
-              datasetIdMap.get(index) ??
-              index;
+              // Try to get ID from result object, then from dataset mapping, then fallback to index
+              const id =
+                resultObj.id ??
+                resultObj.sample_id ??
+                resultObj.task_id ??
+                datasetIdMap.get(index) ??
+                index;
 
-            const perSampleScore =
-              typeof resultData.weighted_score === 'number'
-                ? resultData.weighted_score
-                : typeof grade?.score === 'number'
-                  ? grade.score
-                  : null;
+              const perSampleScore =
+                typeof resultData.weighted_score === 'number'
+                  ? resultData.weighted_score
+                  : typeof grade?.score === 'number'
+                    ? grade.score
+                    : null;
 
-            const tokens =
-              typeof performance?.total_tokens === 'number'
-                ? performance.total_tokens
-                : null;
+              const tokens =
+                typeof performance?.total_tokens === 'number' ? performance.total_tokens : null;
 
-            // Attach optional metadata from dataset (if available) for downstream aggregation
-            const meta =
-              typeof id === 'string' ? datasetMetaById.get(id) : undefined;
+              // Attach optional metadata from dataset (if available) for downstream aggregation
+              const meta = typeof id === 'string' ? datasetMetaById.get(id) : undefined;
 
-            return {
-              id,
-              score: perSampleScore,
-              rationale: grade?.rationale ?? null,
-              tokens,
-              input: meta?.input ?? null,
-              domain: meta?.domain ?? null,
-              skill: meta?.skill ?? null,
-              difficulty: meta?.difficulty ?? null,
-              capability_cluster: meta?.capability_cluster ?? null,
-            };
-          }).filter((r) => r !== null) as Array<{
+              return {
+                id,
+                score: perSampleScore,
+                rationale: grade?.rationale ?? null,
+                tokens,
+                input: meta?.input ?? null,
+                domain: meta?.domain ?? null,
+                skill: meta?.skill ?? null,
+                difficulty: meta?.difficulty ?? null,
+                capability_cluster: meta?.capability_cluster ?? null,
+              };
+            })
+            .filter((r) => r !== null) as Array<{
             id: string | number;
             score: number | null;
             rationale: string | null;
@@ -394,7 +399,7 @@ export class TaskProcessor {
             skill: string | null;
             difficulty: string | null;
             capability_cluster: string | null;
-          }>
+          }>)
         : [];
 
       const totalTokens = compactResults.reduce((sum, r) => {
@@ -436,15 +441,14 @@ export class TaskProcessor {
       await this.apiClient.submitResults(taskId, 'completed', compactPayload);
 
       logger.info({ taskId }, 'Task processed successfully');
-
     } catch (error) {
       logger.error(
         {
           taskId,
           error: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined
+          stack: error instanceof Error ? error.stack : undefined,
         },
-        'Error processing task'
+        'Error processing task',
       );
 
       // Try to submit error result (idempotent)
@@ -453,12 +457,15 @@ export class TaskProcessor {
           taskId,
           'failed',
           {},
-          error instanceof Error ? error.message : String(error)
+          error instanceof Error ? error.message : String(error),
         );
       } catch (submitError) {
         logger.error(
-          { taskId, error: submitError instanceof Error ? submitError.message : String(submitError) },
-          'Failed to submit error result'
+          {
+            taskId,
+            error: submitError instanceof Error ? submitError.message : String(submitError),
+          },
+          'Failed to submit error result',
         );
       }
 
@@ -472,12 +479,18 @@ export class TaskProcessor {
           await this.cleanup(taskWorkDir);
         } catch (cleanupError) {
           logger.warn(
-            { taskId, error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError) },
-            'Failed to cleanup task files'
+            {
+              taskId,
+              error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+            },
+            'Failed to cleanup task files',
           );
         }
       } else {
-        logger.info({ taskId, workDir: path.join(this.workDir, taskId) }, 'KEEP_TASK_FILES=1 set, skipping cleanup of task workDir');
+        logger.info(
+          { taskId, workDir: path.join(this.workDir, taskId) },
+          'KEEP_TASK_FILES=1 set, skipping cleanup of task workDir',
+        );
       }
 
       // Unmark processing (in-memory)
@@ -489,7 +502,11 @@ export class TaskProcessor {
    * SBC9+: Route a skill task to sb-evals, poll for result, and submit to nestapi.
    * The existing Letta path is completely untouched.
    */
-  private async processSkillTask(taskId: string, pair: KeyringPair, taskPayload: Task['task_payload']): Promise<void> {
+  private async processSkillTask(
+    taskId: string,
+    pair: KeyringPair,
+    taskPayload: Task['task_payload'],
+  ): Promise<void> {
     const roundScore = (value: number) => Math.round(value * 100_000) / 100_000;
 
     const timeoutMs = Number(process.env.LETTA_EMBEDDING_WAIT_MINUTES || '30') * 60 * 1000;
@@ -521,10 +538,7 @@ export class TaskProcessor {
       const tmpDir = path.join(this.workDir, taskId);
       await fs.mkdir(tmpDir, { recursive: true });
       const rawOutputPath = path.join(tmpDir, 'raw_evaluation.json');
-      await fs.writeFile(
-        rawOutputPath,
-        JSON.stringify(evaluationResult, null, 2),
-      );
+      await fs.writeFile(rawOutputPath, JSON.stringify(evaluationResult, null, 2));
       await this.apiClient.uploadRawOutputFile(taskId, rawOutputPath);
     } catch (rawError) {
       logger.warn(
@@ -539,70 +553,80 @@ export class TaskProcessor {
 
     // Reuse existing result-extraction logic (same shape as letta-evals output)
     const compactResults = Array.isArray(evaluationResult?.results)
-      ? evaluationResult.results.map((result: unknown) => {
-          if (typeof result !== 'object' || result === null) return null;
-          const resultObj = result as Record<string, any>;
-          const resultData = resultObj.result as Record<string, any> | undefined;
-          if (!resultData) return null;
-          const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
-          const performance = resultData.performance as { total_tokens?: number } | undefined;
-          const id = resultObj.id ?? resultObj.sample_id ?? resultObj.task_id;
-          const perSampleScore =
-            typeof resultData.weighted_score === 'number'
-              ? resultData.weighted_score
-              : typeof grade?.score === 'number'
-                ? grade.score
+      ? evaluationResult.results
+          .map((result: unknown) => {
+            if (typeof result !== 'object' || result === null) return null;
+            const resultObj = result as Record<string, any>;
+            const resultData = resultObj.result as Record<string, any> | undefined;
+            if (!resultData) return null;
+            const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
+            const performance = resultData.performance as { total_tokens?: number } | undefined;
+            const id = resultObj.id ?? resultObj.sample_id ?? resultObj.task_id;
+            const perSampleScore =
+              typeof resultData.weighted_score === 'number'
+                ? resultData.weighted_score
+                : typeof grade?.score === 'number'
+                  ? grade.score
+                  : null;
+            // Per-grader breakdown so the FE can render each grader's score +
+            // rationale instead of the flattened single-line aggregate string.
+            const rawGrades = resultData.grades_by_key as Record<string, unknown> | undefined;
+            const gradesByKey =
+              rawGrades && typeof rawGrades === 'object'
+                ? Object.fromEntries(
+                    Object.entries(rawGrades).flatMap(([key, g]) => {
+                      if (typeof g !== 'object' || g === null) return [];
+                      const gg = g as { score?: unknown; rationale?: unknown };
+                      return [
+                        [
+                          key,
+                          {
+                            score: typeof gg.score === 'number' ? gg.score : null,
+                            rationale: typeof gg.rationale === 'string' ? gg.rationale : null,
+                          },
+                        ],
+                      ];
+                    }),
+                  )
                 : null;
-          // Per-grader breakdown so the FE can render each grader's score +
-          // rationale instead of the flattened single-line aggregate string.
-          const rawGrades = resultData.grades_by_key as Record<string, unknown> | undefined;
-          const gradesByKey =
-            rawGrades && typeof rawGrades === 'object'
-              ? Object.fromEntries(
-                  Object.entries(rawGrades).flatMap(([key, g]) => {
-                    if (typeof g !== 'object' || g === null) return [];
-                    const gg = g as { score?: unknown; rationale?: unknown };
-                    return [
-                      [
-                        key,
-                        {
-                          score: typeof gg.score === 'number' ? gg.score : null,
-                          rationale: typeof gg.rationale === 'string' ? gg.rationale : null,
-                        },
-                      ],
-                    ];
-                  }),
-                )
-              : null;
-          return {
-            id,
-            score: perSampleScore,
-            rationale: grade?.rationale ?? null,
-            grades_by_key: gradesByKey,
-            tokens: typeof performance?.total_tokens === 'number' ? performance.total_tokens : null,
-            input: null,
-            domain: null,
-            skill: null,
-            difficulty: null,
-            capability_cluster: null,
-          };
-        }).filter((r: any) => r !== null)
+            return {
+              id,
+              score: perSampleScore,
+              rationale: grade?.rationale ?? null,
+              grades_by_key: gradesByKey,
+              tokens:
+                typeof performance?.total_tokens === 'number' ? performance.total_tokens : null,
+              input: null,
+              domain: null,
+              skill: null,
+              difficulty: null,
+              capability_cluster: null,
+            };
+          })
+          .filter((r: any) => r !== null)
       : [];
 
-    const totalTokens = compactResults.reduce((sum: number, r: any) => sum + (typeof r.tokens === 'number' ? r.tokens : 0), 0);
+    const totalTokens = compactResults.reduce(
+      (sum: number, r: any) => sum + (typeof r.tokens === 'number' ? r.tokens : 0),
+      0,
+    );
 
     const scoresWithValues = compactResults
       .map((r: any) => r.score)
       .filter((s: any): s is number => typeof s === 'number');
     const calculatedTotalScore =
       scoresWithValues.length > 0
-        ? roundScore(scoresWithValues.reduce((a: number, s: number) => a + s, 0) / scoresWithValues.length)
+        ? roundScore(
+            scoresWithValues.reduce((a: number, s: number) => a + s, 0) / scoresWithValues.length,
+          )
         : null;
 
     // Honor the eval-service's verdict. The validator is what signs on-chain
     // weights, so it treats the summary verdict as authoritative — if the
     // upstream verdict is failure, normalize the submitted score to 0.
-    const evalMetrics = (evaluationResult?.summary as { metrics?: Record<string, unknown> } | undefined)?.metrics;
+    const evalMetrics = (
+      evaluationResult?.summary as { metrics?: Record<string, unknown> } | undefined
+    )?.metrics;
     const verdictPassed = evalMetrics?.overall_gate_passed;
     const verdictFailed = verdictPassed === 0 || verdictPassed === false;
     const finalScore = verdictFailed ? 0 : calculatedTotalScore;
@@ -623,11 +647,13 @@ export class TaskProcessor {
     const metadata = (taskPayload.metadata ?? {}) as Record<string, unknown>;
     const competitionId =
       typeof metadata.competition_id === 'string' ? metadata.competition_id : null;
-    const rawMinerHotkey =
-      typeof metadata.miner_hotkey === 'string' ? metadata.miner_hotkey : null;
+    const rawMinerHotkey = typeof metadata.miner_hotkey === 'string' ? metadata.miner_hotkey : null;
 
     let minerHotkeySs58: string | null = null;
-    let integrity: { integrity_hash: string; scoring: Record<string, unknown> } | null = null;
+    let integrity: {
+      integrity_hash: string;
+      scoring: Record<string, unknown>;
+    } | null = null;
 
     if (competitionId && rawMinerHotkey && this.pair) {
       try {
@@ -649,13 +675,20 @@ export class TaskProcessor {
         };
       } catch (error) {
         logger.warn(
-          { taskId, error: error instanceof Error ? error.message : String(error) },
+          {
+            taskId,
+            error: error instanceof Error ? error.message : String(error),
+          },
           'Failed to compute integrity hash (submitting result without it)',
         );
       }
     } else {
       logger.warn(
-        { taskId, hasCompetitionId: !!competitionId, hasMinerHotkey: !!rawMinerHotkey },
+        {
+          taskId,
+          hasCompetitionId: !!competitionId,
+          hasMinerHotkey: !!rawMinerHotkey,
+        },
         'Task metadata missing competition_id/miner_hotkey — result will lack integrity hash + weight attribution',
       );
     }
@@ -670,7 +703,15 @@ export class TaskProcessor {
       ...(integrity ?? {}),
     };
 
-    logger.info({ taskId, score: finalScore, testsCount: compactResults.length, totalTokens }, 'Submitting sb-evals skill results');
+    logger.info(
+      {
+        taskId,
+        score: finalScore,
+        testsCount: compactResults.length,
+        totalTokens,
+      },
+      'Submitting sb-evals skill results',
+    );
     await this.apiClient.submitResults(taskId, 'completed', compactPayload);
     logger.info({ taskId }, 'Skill task processed successfully via sb-evals');
 
@@ -686,7 +727,10 @@ export class TaskProcessor {
         });
       } catch (error) {
         logger.warn(
-          { taskId, error: error instanceof Error ? error.message : String(error) },
+          {
+            taskId,
+            error: error instanceof Error ? error.message : String(error),
+          },
           'onScored listener threw (ignored)',
         );
       }
@@ -704,32 +748,34 @@ export class TaskProcessor {
     }
 
     // Parse header
-    const header = lines[0].split(',').map(h => h.trim());
-    
+    const header = lines[0].split(',').map((h) => h.trim());
+
     // Parse rows and convert to JSON objects
     const jsonlLines: string[] = [];
     for (let i = 1; i < lines.length; i++) {
       const line = lines[i].trim();
       if (!line) continue; // Skip empty lines
-      
+
       // Simple CSV parsing (handles basic cases, may need improvement for quoted values)
       const values = this.parseCsvLine(line);
-      
+
       // Create object from header and values
       const obj: Record<string, any> = {};
       for (let j = 0; j < header.length; j++) {
         let value = values[j] || '';
         const headerName = header[j];
-        
+
         // Remove surrounding quotes if present (CSV parser may leave them)
         value = value.trim();
-        if ((value.startsWith('"') && value.endsWith('"')) || 
-            (value.startsWith("'") && value.endsWith("'"))) {
+        if (
+          (value.startsWith('"') && value.endsWith('"')) ||
+          (value.startsWith("'") && value.endsWith("'"))
+        ) {
           value = value.slice(1, -1);
           // Unescape escaped quotes ("" -> ")
           value = value.replace(/""/g, '"');
         }
-        
+
         // Try to parse JSON strings (e.g., rubric_vars column)
         // If it's a JSON string (starts with { or [), parse it
         if (value.trim().startsWith('{') || value.trim().startsWith('[')) {
@@ -743,10 +789,10 @@ export class TaskProcessor {
           obj[headerName] = value;
         }
       }
-      
+
       jsonlLines.push(JSON.stringify(obj));
     }
-    
+
     return jsonlLines.join('\n');
   }
 
@@ -757,10 +803,10 @@ export class TaskProcessor {
     const values: string[] = [];
     let current = '';
     let inQuotes = false;
-    
+
     for (let i = 0; i < line.length; i++) {
       const char = line[i];
-      
+
       if (char === '"') {
         if (inQuotes && line[i + 1] === '"') {
           // Escaped quote
@@ -778,10 +824,10 @@ export class TaskProcessor {
         current += char;
       }
     }
-    
+
     // Add last field
     values.push(current.trim());
-    
+
     return values;
   }
 
@@ -791,27 +837,27 @@ export class TaskProcessor {
   private isCsvContent(content: string): boolean {
     const lines = content.trim().split('\n');
     if (lines.length < 2) return false;
-    
+
     const firstLine = lines[0].trim();
-    
+
     // If first line starts with { or [, it's JSON/JSONL, not CSV
     if (firstLine.startsWith('{') || firstLine.startsWith('[')) {
       return false;
     }
-    
+
     // Check if it looks like CSV: has commas, has newlines, first line has multiple comma-separated values
     const commaCount = (firstLine.match(/,/g) || []).length;
-    
+
     // If first line has commas and multiple lines, likely CSV
     return commaCount > 0 && lines.length > 1;
   }
 
   /**
    * Prepare files from task payload
-   * 
+   *
    * All files are created in the provided workDir, which should be task-specific
    * (e.g., /tmp/validator-work/{taskId}/) to prevent overwrites between concurrent tasks.
-   * 
+   *
    * @param taskPayload - Task payload containing files and config
    * @param workDir - Task-specific work directory (must be unique per task)
    */
@@ -822,41 +868,45 @@ export class TaskProcessor {
   private async downloadFilesFromGitHub(
     repoUrl: string,
     folderPath: string,
-    outputDir: string
+    outputDir: string,
   ): Promise<string[]> {
     // GitHub API URL format: https://api.github.com/repos/owner/repo/contents/path
     // Extract owner, repo, branch, and path from the GitHub URL
     // Format: https://github.com/owner/repo/tree/branch/path
     const match = repoUrl.match(/https:\/\/github\.com\/([^/]+)\/([^/]+)\/tree\/([^/]+)\/(.+)/);
     if (!match) {
-      throw new Error(`Invalid GitHub URL format: ${repoUrl}. Expected format: https://github.com/owner/repo/tree/branch/path`);
+      throw new Error(
+        `Invalid GitHub URL format: ${repoUrl}. Expected format: https://github.com/owner/repo/tree/branch/path`,
+      );
     }
-    
+
     const [, owner, repo, branch, repoPath] = match;
     const githubApiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${repoPath}`;
-    
+
     logger.info({ repoUrl, folderPath, githubApiUrl }, 'Downloading files from GitHub');
 
     try {
       // Prepare headers with optional GitHub token for authentication
       const headers: Record<string, string> = {
-        'Accept': 'application/vnd.github.v3+json',
-        'User-Agent': 'SundaeBar-Validator'
+        Accept: 'application/vnd.github.v3+json',
+        'User-Agent': 'SundaeBar-Validator',
       };
-      
+
       // Add GitHub token if available (authenticated requests get higher rate limits)
       if (process.env.GITHUB_TOKEN) {
         headers['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
       }
-      
+
       // Use GitHub API to list files in the directory
       const response = await fetch(githubApiUrl, {
-        headers
+        headers,
       });
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => '');
-        throw new Error(`Failed to fetch GitHub directory: ${response.status} ${response.statusText}. ${errorText}`);
+        throw new Error(
+          `Failed to fetch GitHub directory: ${response.status} ${response.statusText}. ${errorText}`,
+        );
       }
 
       const items = await response.json();
@@ -870,22 +920,25 @@ export class TaskProcessor {
         if (item.type === 'file') {
           // Use raw.githubusercontent.com for direct file download
           const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${repoPath}/${item.name}`;
-          
+
           const fileHeaders: Record<string, string> = {
-            'User-Agent': 'SundaeBar-Validator'
+            'User-Agent': 'SundaeBar-Validator',
           };
-          
+
           // Add GitHub token if available
           if (process.env.GITHUB_TOKEN) {
             fileHeaders['Authorization'] = `token ${process.env.GITHUB_TOKEN}`;
           }
-          
+
           const fileResponse = await fetch(rawUrl, {
-            headers: fileHeaders
+            headers: fileHeaders,
           });
-          
+
           if (!fileResponse.ok) {
-            logger.warn({ file: item.name, status: fileResponse.status }, 'Failed to download file from GitHub');
+            logger.warn(
+              { file: item.name, status: fileResponse.status },
+              'Failed to download file from GitHub',
+            );
             continue;
           }
 
@@ -901,7 +954,7 @@ export class TaskProcessor {
           const subFiles = await this.downloadFilesFromGitHub(
             subRepoUrl,
             `${folderPath}/${item.name}`,
-            subDir
+            subDir,
           );
           downloadedFiles.push(...subFiles);
         }
@@ -914,15 +967,20 @@ export class TaskProcessor {
       return downloadedFiles;
     } catch (error) {
       logger.error(
-        { error: error instanceof Error ? error.message : String(error), repoUrl, folderPath },
-        'Failed to download files from GitHub'
+        {
+          error: error instanceof Error ? error.message : String(error),
+          repoUrl,
+          folderPath,
+        },
+        'Failed to download files from GitHub',
       );
       throw error;
     }
   }
 
   // GitHub repo constant for filesystem data
-  private readonly GITHUB_REPO_URL = 'https://github.com/sundae-bar/sn121-ch-data/tree/main/filesystem_data';
+  private readonly GITHUB_REPO_URL =
+    'https://github.com/sundae-bar/sn121-ch-data/tree/main/filesystem_data';
   private readonly FILESYSTEM_DATA_FOLDER_NAME = 'filesystem_data';
 
   /**
@@ -931,7 +989,7 @@ export class TaskProcessor {
   private async downloadFileWithBackup(
     primaryUrl: string,
     backupUrl?: string,
-    timeoutMs: number = 10_000
+    timeoutMs: number = 10_000,
   ): Promise<string> {
     const logPrimary = primaryUrl.substring(0, 200);
     const logBackup = backupUrl ? backupUrl.substring(0, 200) : undefined;
@@ -953,10 +1011,10 @@ export class TaskProcessor {
             cache: 'no-store',
             headers: {
               'Cache-Control': 'no-store',
-              'Pragma': 'no-cache',
-              'Expires': '0'
+              Pragma: 'no-cache',
+              Expires: '0',
             },
-            signal: controller.signal
+            signal: controller.signal,
           });
           clearTimeout(timer);
 
@@ -971,9 +1029,9 @@ export class TaskProcessor {
                 status: response.status,
                 attempt,
                 elapsedMs: elapsed,
-                bodySnippet: bodySnippet.slice(0, 500)
+                bodySnippet: bodySnippet.slice(0, 500),
               },
-              statusMsg
+              statusMsg,
             );
 
             if (response.status >= 500 && attempt < maxAttempts) {
@@ -989,7 +1047,15 @@ export class TaskProcessor {
           const elapsed = Date.now() - start;
           const isLast = attempt === maxAttempts;
           const errMsg = err instanceof Error ? err.message : String(err);
-          logger.warn({ url: url.substring(0, 200), attempt, elapsedMs: elapsed, err: errMsg }, 'Download attempt failed');
+          logger.warn(
+            {
+              url: url.substring(0, 200),
+              attempt,
+              elapsedMs: elapsed,
+              err: errMsg,
+            },
+            'Download attempt failed',
+          );
           if (isLast) {
             throw err;
           }
@@ -1003,7 +1069,10 @@ export class TaskProcessor {
       return await attemptDownload(primaryUrl);
     } catch (primaryErr) {
       if (backupUrl) {
-        logger.warn({ primary: logPrimary, backup: logBackup, err: String(primaryErr) }, 'Primary download failed, trying backup');
+        logger.warn(
+          { primary: logPrimary, backup: logBackup, err: String(primaryErr) },
+          'Primary download failed, trying backup',
+        );
         return attemptDownload(backupUrl);
       }
       throw primaryErr;
@@ -1012,60 +1081,90 @@ export class TaskProcessor {
 
   /**
    * Update agent file to reference the real Letta folder ID
-   * 
+   *
    * Updates source_ids, files_agents, and sources arrays to use the actual folder ID
    * instead of placeholder IDs. Also resets is_open and visible_content state fields.
-   * 
+   *
    * @param agentContent - The agent file content as a JSON string
    * @param folderId - The real Letta folder ID to use
    * @param taskId - Task ID for logging purposes
    * @returns Updated agent file content as a JSON string
    */
-  private updateAgentFileWithFolderId(agentContent: string, folderId: string, taskId: string): string {
+  private updateAgentFileWithFolderId(
+    agentContent: string,
+    folderId: string,
+    taskId: string,
+  ): string {
     const agentData = JSON.parse(agentContent);
     if (!agentData.agents || !Array.isArray(agentData.agents) || agentData.agents.length === 0) {
-      logger.warn(
-        { taskId },
-        'Agent file does not have agents array or it is empty'
-      );
+      logger.warn({ taskId }, 'Agent file does not have agents array or it is empty');
       return agentContent; // Return unchanged if structure is invalid
     }
 
     const agent = agentData.agents[0];
     let updated = false;
-    
+
     // Find any placeholder source IDs (source-0, source-1, etc.) for reference
     // We'll use this to update files_agents and files arrays
     const placeholderPattern = /^source-\d+$/; // Matches source-0, source-1, etc.
-    const originalSourceId = agent.source_ids && agent.source_ids.length > 0 
-      ? agent.source_ids[0] 
-      : 'source-0';
-    
+    const originalSourceId =
+      agent.source_ids && agent.source_ids.length > 0 ? agent.source_ids[0] : 'source-0';
+
     // 1. Force folder_ids to contain the real Letta folder ID (full control over which folder is used)
     if (!agent.folder_ids) {
       agent.folder_ids = [];
     }
     if (!Array.isArray(agent.folder_ids)) {
       logger.warn({ taskId }, 'folder_ids is not an array, converting');
-      agent.folder_ids = Array.isArray(agent.folder_ids) ? agent.folder_ids : [agent.folder_ids].filter(Boolean);
+      agent.folder_ids = Array.isArray(agent.folder_ids)
+        ? agent.folder_ids
+        : [agent.folder_ids].filter(Boolean);
     }
     if (!agent.folder_ids.includes(folderId)) {
       agent.folder_ids.push(folderId);
       updated = true;
     }
     logger.debug(
-      { folderId, folderIdsCount: agent.folder_ids.length, sourceIdsCount: agent.source_ids?.length || 0 },
-      'Updated folder_ids array for agent (source_ids kept as placeholders)'
+      {
+        folderId,
+        folderIdsCount: agent.folder_ids.length,
+        sourceIdsCount: agent.source_ids?.length || 0,
+      },
+      'Updated folder_ids array for agent (source_ids kept as placeholders)',
     );
 
     // 2. Overwrite files/files_agents with our canonical policy files so users cannot control attachments
     const canonicalFiles = [
-      { id: 'file-0', file_name: 'filesystem_data/approval_workflows.md', original_file_name: 'approval_workflows.md' },
-      { id: 'file-1', file_name: 'filesystem_data/client_tiers.json', original_file_name: 'client_tiers.json' },
-      { id: 'file-2', file_name: 'filesystem_data/escalation_matrix.md', original_file_name: 'escalation_matrix.md' },
-      { id: 'file-3', file_name: 'filesystem_data/travel_expense_policy.md', original_file_name: 'travel_expense_policy.md' },
-      { id: 'file-4', file_name: 'filesystem_data/pto_policy.md', original_file_name: 'pto_policy.md' },
-      { id: 'file-5', file_name: 'filesystem_data/org_chart.json', original_file_name: 'org_chart.json' },
+      {
+        id: 'file-0',
+        file_name: 'filesystem_data/approval_workflows.md',
+        original_file_name: 'approval_workflows.md',
+      },
+      {
+        id: 'file-1',
+        file_name: 'filesystem_data/client_tiers.json',
+        original_file_name: 'client_tiers.json',
+      },
+      {
+        id: 'file-2',
+        file_name: 'filesystem_data/escalation_matrix.md',
+        original_file_name: 'escalation_matrix.md',
+      },
+      {
+        id: 'file-3',
+        file_name: 'filesystem_data/travel_expense_policy.md',
+        original_file_name: 'travel_expense_policy.md',
+      },
+      {
+        id: 'file-4',
+        file_name: 'filesystem_data/pto_policy.md',
+        original_file_name: 'pto_policy.md',
+      },
+      {
+        id: 'file-5',
+        file_name: 'filesystem_data/org_chart.json',
+        original_file_name: 'org_chart.json',
+      },
     ] as const;
 
     const nowIso = new Date().toISOString();
@@ -1105,28 +1204,28 @@ export class TaskProcessor {
           updated = true;
           logger.debug(
             { sourceId: source.id, oldName, newName: 'filesystem_data' },
-            'Updated source name to filesystem_data'
+            'Updated source name to filesystem_data',
           );
         }
       }
     }
-    
+
     if (updated) {
       const updatedContent = JSON.stringify(agentData, null, 2);
       logger.debug(
-        { 
-          folderId, 
+        {
+          folderId,
           taskId,
           folderIdsUpdated: agent.folder_ids.includes(folderId),
-          hasFilesAgents: !!(agent.files_agents && agent.files_agents.length > 0)
+          hasFilesAgents: !!(agent.files_agents && agent.files_agents.length > 0),
         },
-        'Updated agent file with folder ID in folder_ids array'
+        'Updated agent file with folder ID in folder_ids array',
       );
       return updatedContent;
     } else {
       logger.warn(
         { folderId, taskId },
-        'No updates made to agent file (structure may be unexpected)'
+        'No updates made to agent file (structure may be unexpected)',
       );
       return agentContent; // Return unchanged if no updates were made
     }
@@ -1145,7 +1244,8 @@ export class TaskProcessor {
     if (!llmConfig) return agentContent;
 
     const isOpenRouterDeepSeek =
-      (llmConfig.model_endpoint?.includes('openrouter.ai') || llmConfig.provider_name === 'openrouter') &&
+      (llmConfig.model_endpoint?.includes('openrouter.ai') ||
+        llmConfig.provider_name === 'openrouter') &&
       llmConfig.model?.toLowerCase().includes('deepseek');
 
     if (!isOpenRouterDeepSeek) return agentContent;
@@ -1163,18 +1263,20 @@ export class TaskProcessor {
    */
   private async validateDataset(datasetPath: string): Promise<void> {
     const content = await fs.readFile(datasetPath, 'utf-8');
-    const firstLine = content.split('\n').find(l => l.trim());
+    const firstLine = content.split('\n').find((l) => l.trim());
     if (!firstLine) {
       throw new Error('Dataset file is empty');
     }
-    
+
     let parsed: any;
     try {
       parsed = JSON.parse(firstLine.trim());
     } catch (e) {
-      throw new Error(`Failed to parse dataset first line as JSON: ${e instanceof Error ? e.message : String(e)}`);
+      throw new Error(
+        `Failed to parse dataset first line as JSON: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
-    
+
     // Handle multiple levels of double-encoding (keep unwrapping)
     let unwrapCount = 0;
     while (typeof parsed === 'string' && unwrapCount < 5) {
@@ -1182,40 +1284,40 @@ export class TaskProcessor {
       parsed = JSON.parse(parsed);
       unwrapCount++;
     }
-    
+
     if (unwrapCount > 0) {
       logger.warn({ unwrapCount }, `Dataset was ${unwrapCount}x encoded`);
     }
-    
+
     // Check if it's an object with 'input' field
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
       throw new Error(`Dataset first line must be a JSON object, got ${typeof parsed}`);
     }
-    
+
     // Check for 'input' field
     const keys = Object.keys(parsed);
     const hasInput = 'input' in parsed;
-    
+
     logger.debug(
-      { 
-        datasetPath, 
-        keys, 
+      {
+        datasetPath,
+        keys,
         hasInput,
-        parsedType: typeof parsed
-      }, 
-      'Dataset validation check'
+        parsedType: typeof parsed,
+      },
+      'Dataset validation check',
     );
-    
+
     if (!hasInput) {
       throw new Error(`Dataset missing "input" field. Found keys: ${keys.join(', ')}`);
     }
-    
+
     logger.debug({ datasetPath, keys }, 'Dataset validation passed');
   }
 
   private async prepareFiles(
     taskPayload: Task['task_payload'],
-    workDir: string
+    workDir: string,
   ): Promise<{
     suitePath: string;
     agentFilePath?: string;
@@ -1233,7 +1335,7 @@ export class TaskProcessor {
     // We always check files, but only upload if they've changed
     let folderId: string | undefined;
     let filesWereUploaded = false; // Track if any files were actually uploaded
-    
+
     if (this.lettaClient) {
       try {
         // Log all agents in Letta for debugging, then delete them all
@@ -1242,22 +1344,22 @@ export class TaskProcessor {
           logger.debug(
             {
               totalAgents: allAgents.length,
-              agents: allAgents.map(a => ({
+              agents: allAgents.map((a) => ({
                 id: a.id,
                 name: a.name,
                 created_at: a.created_at,
               })),
             },
-            'All agents in Letta'
+            'All agents in Letta',
           );
-          
+
           // Delete all agents to clean up from previous runs
           if (allAgents.length > 0) {
             logger.debug(
               { agentCount: allAgents.length },
-              'Deleting all agents to clean up from previous runs'
+              'Deleting all agents to clean up from previous runs',
             );
-            
+
             let deletedCount = 0;
             let failedCount = 0;
             for (const agent of allAgents) {
@@ -1267,29 +1369,29 @@ export class TaskProcessor {
               } catch (error) {
                 failedCount++;
                 logger.warn(
-                  { 
+                  {
                     error: error instanceof Error ? error.message : String(error),
                     agentId: agent.id,
-                    agentName: agent.name
+                    agentName: agent.name,
                   },
-                  'Failed to delete agent (non-fatal)'
+                  'Failed to delete agent (non-fatal)',
                 );
               }
             }
-            
+
             logger.debug(
-              { 
+              {
                 total: allAgents.length,
                 deleted: deletedCount,
-                failed: failedCount
+                failed: failedCount,
               },
-              'Completed deletion of all agents'
+              'Completed deletion of all agents',
             );
           }
         } catch (error) {
           logger.warn(
             { error: error instanceof Error ? error.message : String(error) },
-            'Failed to list/delete all agents (non-fatal)'
+            'Failed to list/delete all agents (non-fatal)',
           );
         }
 
@@ -1299,19 +1401,19 @@ export class TaskProcessor {
           logger.debug(
             {
               totalFolders: allFolders.length,
-              folders: allFolders.map(f => ({
+              folders: allFolders.map((f) => ({
                 id: f.id,
                 name: f.name,
                 description: f.description,
                 created_at: f.created_at,
               })),
             },
-            'All folders in Letta'
+            'All folders in Letta',
           );
         } catch (error) {
           logger.warn(
             { error: error instanceof Error ? error.message : String(error) },
-            'Failed to list all folders (non-fatal)'
+            'Failed to list all folders (non-fatal)',
           );
         }
 
@@ -1323,7 +1425,7 @@ export class TaskProcessor {
           // If cleanup fails due to API issues, log but continue - we'll try again next time
           logger.warn(
             { error: error instanceof Error ? error.message : String(error) },
-            'Failed to cleanup orphaned folders (non-fatal, will retry on next task)'
+            'Failed to cleanup orphaned folders (non-fatal, will retry on next task)',
           );
         }
 
@@ -1333,23 +1435,29 @@ export class TaskProcessor {
           folderId = this.filesystemDataFolderId;
           logger.debug(
             { taskId: taskPayload.task_id, folderId },
-            'Using cached filesystem data folder ID'
+            'Using cached filesystem data folder ID',
           );
         } else {
-          logger.debug({ taskId: taskPayload.task_id }, 'Finding or creating filesystem data folder');
+          logger.debug(
+            { taskId: taskPayload.task_id },
+            'Finding or creating filesystem data folder',
+          );
           const folder = await this.lettaClient.findOrCreateFolder(
             this.FILESYSTEM_DATA_FOLDER_NAME,
-            'Filesystem data from GitHub repository'
+            'Filesystem data from GitHub repository',
           );
-          
+
           if (!folder || !folder.id) {
             throw new Error(`Folder creation returned invalid response: ${JSON.stringify(folder)}`);
           }
-          
+
           folderId = folder.id;
           this.filesystemDataFolderId = folderId; // Cache it
-          logger.debug({ folderId, folderName: folder.name }, 'Folder ID obtained for filesystem data');
-          
+          logger.debug(
+            { folderId, folderName: folder.name },
+            'Folder ID obtained for filesystem data',
+          );
+
           // Log files in folder before evaluation starts
           try {
             const folderFiles = await this.lettaClient.listFilesInFolder(folderId);
@@ -1358,29 +1466,33 @@ export class TaskProcessor {
                 taskId: taskPayload.task_id,
                 folderId,
                 fileCount: folderFiles.length,
-                files: folderFiles.map(f => ({
+                files: folderFiles.map((f) => ({
                   id: f.id,
                   name: f.name || f.file_name,
                   size: f.size,
-                  status: f.processing_status
-                }))
+                  status: f.processing_status,
+                })),
               },
-              'Files in folder before evaluation'
+              'Files in folder before evaluation',
             );
           } catch (error) {
             logger.warn(
-              { error: error instanceof Error ? error.message : String(error), taskId: taskPayload.task_id, folderId },
-              'Failed to list files in folder'
+              {
+                error: error instanceof Error ? error.message : String(error),
+                taskId: taskPayload.task_id,
+                folderId,
+              },
+              'Failed to list files in folder',
             );
           }
         }
-        
+
         // Download files from GitHub
         const filesDir = path.join(workDir, 'filesystem_data');
         const downloadedFiles = await this.downloadFilesFromGitHub(
           this.GITHUB_REPO_URL,
           'filesystem_data',
-          filesDir
+          filesDir,
         );
 
         // List existing files once (more efficient than checking per-file)
@@ -1399,7 +1511,7 @@ export class TaskProcessor {
           {
             folderId,
             existingFileCount: existingFiles.length,
-            existingFiles: existingFiles.map(f => ({
+            existingFiles: existingFiles.map((f) => ({
               name: f.name,
               id: f.id,
               size: f.size,
@@ -1408,64 +1520,89 @@ export class TaskProcessor {
             })),
             fileNames: Array.from(existingFilesMap.keys()),
           },
-          'Loaded existing files from folder'
+          'Loaded existing files from folder',
         );
 
         // Upload files from GitHub to Letta folder, only if they're new or changed
         let githubUploadedCount = 0;
         let githubSkippedCount = 0;
         let githubErrorCount = 0;
-        
+
         for (const filePath of downloadedFiles) {
           try {
             const fileName = path.basename(filePath);
             const existingFile = existingFilesMap.get(fileName);
-            
+
             if (existingFile) {
               // File exists - check if size changed
               const localSize = await this.lettaClient.getFileSize(filePath);
-              
+
               // If we don't have size info for existing file, skip upload (assume unchanged)
               if (!existingFile.size) {
                 githubSkippedCount++;
                 logger.debug(
-                  { source: 'github', fileName, folderId, localSize, reason: 'No size info for existing file, assuming unchanged' },
-                  'File skipped (exists but no size info)'
+                  {
+                    source: 'github',
+                    fileName,
+                    folderId,
+                    localSize,
+                    reason: 'No size info for existing file, assuming unchanged',
+                  },
+                  'File skipped (exists but no size info)',
                 );
                 continue;
               }
-              
+
               // Compare sizes - only replace if different
               if (existingFile.size === localSize) {
                 githubSkippedCount++;
                 logger.debug(
                   { source: 'github', fileName, folderId, size: localSize },
-                  'File skipped (already exists and unchanged)'
+                  'File skipped (already exists and unchanged)',
                 );
                 continue;
               } else {
                 // Size changed - replace it
                 logger.info(
-                  { source: 'github', fileName, folderId, existingSize: existingFile.size, newSize: localSize },
-                  'File exists but size changed, replacing'
+                  {
+                    source: 'github',
+                    fileName,
+                    folderId,
+                    existingSize: existingFile.size,
+                    newSize: localSize,
+                  },
+                  'File exists but size changed, replacing',
                 );
                 await this.lettaClient.uploadFileToFolder(folderId, filePath, fileName, 'replace');
                 githubUploadedCount++;
                 filesWereUploaded = true;
                 // Update the map so subsequent checks see the new file
-                existingFilesMap.set(fileName, { ...existingFile, size: localSize });
+                existingFilesMap.set(fileName, {
+                  ...existingFile,
+                  size: localSize,
+                });
                 logger.info(
-                  { source: 'github', fileName, folderId, reason: 'File replaced due to size change' },
-                  'File uploaded to Letta folder'
+                  {
+                    source: 'github',
+                    fileName,
+                    folderId,
+                    reason: 'File replaced due to size change',
+                  },
+                  'File uploaded to Letta folder',
                 );
               }
             } else {
               // File doesn't exist - upload it
               logger.info(
                 { source: 'github', fileName, folderId },
-                'File does not exist, uploading'
+                'File does not exist, uploading',
               );
-              const fileMetadata = await this.lettaClient.uploadFileToFolder(folderId, filePath, fileName, 'replace');
+              const fileMetadata = await this.lettaClient.uploadFileToFolder(
+                folderId,
+                filePath,
+                fileName,
+                'replace',
+              );
               githubUploadedCount++;
               filesWereUploaded = true;
               // Add to map so subsequent checks see it
@@ -1473,15 +1610,25 @@ export class TaskProcessor {
                 existingFilesMap.set(fileName, fileMetadata);
               }
               logger.info(
-                { source: 'github', fileName, folderId, reason: 'New file uploaded' },
-                'File uploaded to Letta folder'
+                {
+                  source: 'github',
+                  fileName,
+                  folderId,
+                  reason: 'New file uploaded',
+                },
+                'File uploaded to Letta folder',
               );
             }
           } catch (error) {
             githubErrorCount++;
             logger.error(
-              { source: 'github', error: error instanceof Error ? error.message : String(error), filePath, folderId },
-              'Failed to upload file to Letta folder'
+              {
+                source: 'github',
+                error: error instanceof Error ? error.message : String(error),
+                filePath,
+                folderId,
+              },
+              'Failed to upload file to Letta folder',
             );
             // Continue with other files even if one fails
           }
@@ -1497,7 +1644,7 @@ export class TaskProcessor {
               errors: githubErrorCount,
             },
           },
-          'Filesystem data files processed from GitHub'
+          'Filesystem data files processed from GitHub',
         );
 
         // Log all files currently in the Letta folder (helps debug file names / paths)
@@ -1507,7 +1654,7 @@ export class TaskProcessor {
             {
               folderId,
               filesCount: filesInFolder.length,
-              files: filesInFolder.map(f => ({
+              files: filesInFolder.map((f) => ({
                 id: f.id,
                 name: f.name,
                 file_name: f.file_name,
@@ -1518,7 +1665,7 @@ export class TaskProcessor {
                 chunks_embedded: f.chunks_embedded,
               })),
             },
-            'Letta folder files listing (post-upload)'
+            'Letta folder files listing (post-upload)',
           );
         } catch (listError) {
           logger.warn(
@@ -1526,7 +1673,7 @@ export class TaskProcessor {
               folderId,
               error: listError instanceof Error ? listError.message : String(listError),
             },
-            'Failed to list files in Letta folder for debugging'
+            'Failed to list files in Letta folder for debugging',
           );
         }
 
@@ -1538,20 +1685,20 @@ export class TaskProcessor {
             githubUploaded: githubUploadedCount,
             githubSkipped: githubSkippedCount,
           },
-          filesWereUploaded 
+          filesWereUploaded
             ? 'Files were uploaded/changed - will wait for embeddings'
-            : 'No files were uploaded (all unchanged) - skipping embedding wait'
+            : 'No files were uploaded (all unchanged) - skipping embedding wait',
         );
       } catch (error) {
-          logger.error(
-            {
-              error: error instanceof Error ? error.message : String(error),
-              taskId: taskPayload.task_id
-            },
-            'Failed to initialize filesystem data'
-          );
-          throw error;
-        }
+        logger.error(
+          {
+            error: error instanceof Error ? error.message : String(error),
+            taskId: taskPayload.task_id,
+          },
+          'Failed to initialize filesystem data',
+        );
+        throw error;
+      }
 
       // Verify files are actually available in the folder and wait for embeddings to complete
       // Only wait if we actually uploaded new/changed files
@@ -1560,13 +1707,13 @@ export class TaskProcessor {
           // No files were uploaded, so existing files are already embedded - skip wait
           logger.debug(
             { folderId, taskId: taskPayload.task_id },
-            'Skipping embedding wait - no files were uploaded (all unchanged)'
+            'Skipping embedding wait - no files were uploaded (all unchanged)',
           );
         } else {
           // Files were uploaded/changed - wait for embeddings to complete
           logger.info(
             { folderId, taskId: taskPayload.task_id },
-            'Files were uploaded/changed - waiting for embeddings to complete'
+            'Files were uploaded/changed - waiting for embeddings to complete',
           );
           try {
             // Increase default wait to 30 minutes unless overridden
@@ -1579,14 +1726,14 @@ export class TaskProcessor {
             let attemptCount = 0;
             let initialCheck = true;
 
-            while (!allFilesReady && (Date.now() - startTime) < maxWaitMs) {
+            while (!allFilesReady && Date.now() - startTime < maxWaitMs) {
               attemptCount++;
               const filesInFolder = await this.lettaClient.listFilesInFolder(folderId);
 
               if (filesInFolder.length === 0) {
                 logger.warn(
                   { folderId, attempt: attemptCount },
-                  'No files found in Letta folder - waiting for files to appear'
+                  'No files found in Letta folder - waiting for files to appear',
                 );
                 await setTimeoutPromise(pollIntervalMs);
                 continue;
@@ -1599,10 +1746,14 @@ export class TaskProcessor {
                 embedding: 0,
                 completed: 0,
                 error: 0,
-                unknown: 0
+                unknown: 0,
               };
 
-              const filesNotReady: Array<{ name: string; status: string; chunks?: string }> = [];
+              const filesNotReady: Array<{
+                name: string;
+                status: string;
+                chunks?: string;
+              }> = [];
               const filesWithErrors: Array<{ name: string; error: string }> = [];
 
               for (const file of filesInFolder) {
@@ -1612,21 +1763,23 @@ export class TaskProcessor {
                   (file as any).original_file_name ||
                   (file as any).name ||
                   'unknown';
-                statusCounts[status as keyof typeof statusCounts] = (statusCounts[status as keyof typeof statusCounts] || 0) + 1;
+                statusCounts[status as keyof typeof statusCounts] =
+                  (statusCounts[status as keyof typeof statusCounts] || 0) + 1;
 
                 if (status === 'error') {
                   filesWithErrors.push({
                     name: displayName,
-                    error: file.error_message || 'Unknown error'
+                    error: file.error_message || 'Unknown error',
                   });
                 } else if (status !== 'completed' && status !== 'unknown') {
-                  const chunksInfo = file.total_chunks && file.chunks_embedded !== undefined
-                    ? `${file.chunks_embedded}/${file.total_chunks}`
-                    : undefined;
+                  const chunksInfo =
+                    file.total_chunks && file.chunks_embedded !== undefined
+                      ? `${file.chunks_embedded}/${file.total_chunks}`
+                      : undefined;
                   filesNotReady.push({
                     name: displayName,
                     status,
-                    chunks: chunksInfo
+                    chunks: chunksInfo,
                   });
                 }
               }
@@ -1636,9 +1789,9 @@ export class TaskProcessor {
                   {
                     folderId,
                     filesWithErrors: filesWithErrors.slice(0, 5),
-                    allErrorsLogged: filesWithErrors.length <= 5
+                    allErrorsLogged: filesWithErrors.length <= 5,
                   },
-                  'ERROR: Some files failed embedding - evaluation may be affected'
+                  'ERROR: Some files failed embedding - evaluation may be affected',
                 );
                 // Continue anyway - don't block on errors, but log them
               }
@@ -1651,9 +1804,9 @@ export class TaskProcessor {
                     {
                       folderId,
                       filesCount: filesInFolder.length,
-                      statusCounts
+                      statusCounts,
                     },
-                    'All files are already completed and ready for semantic search (no wait needed)'
+                    'All files are already completed and ready for semantic search (no wait needed)',
                   );
                 } else {
                   // Files completed during our wait
@@ -1663,9 +1816,9 @@ export class TaskProcessor {
                       filesCount: filesInFolder.length,
                       statusCounts,
                       waitTimeSeconds: Math.round((Date.now() - startTime) / 1000),
-                      attempts: attemptCount
+                      attempts: attemptCount,
                     },
-                    'All files are completed and ready for semantic search'
+                    'All files are completed and ready for semantic search',
                   );
                 }
               } else {
@@ -1682,9 +1835,9 @@ export class TaskProcessor {
                       filesNotReadyCount: filesNotReady.length,
                       filesNotReady: filesNotReady.slice(0, 5), // Log first 5 files not ready
                       elapsedSeconds,
-                      maxWaitMinutes
+                      maxWaitMinutes,
                     },
-                    `Waiting for file embeddings to complete (${filesNotReady.length} file(s) still processing)`
+                    `Waiting for file embeddings to complete (${filesNotReady.length} file(s) still processing)`,
                   );
                 }
 
@@ -1699,18 +1852,18 @@ export class TaskProcessor {
                 {
                   folderId,
                   elapsedSeconds,
-                  maxWaitMinutes
+                  maxWaitMinutes,
                 },
-                `WARNING: Timed out waiting for file embeddings (${maxWaitMinutes} minutes) - proceeding with evaluation anyway. Some files may not be searchable yet.`
+                `WARNING: Timed out waiting for file embeddings (${maxWaitMinutes} minutes) - proceeding with evaluation anyway. Some files may not be searchable yet.`,
               );
             }
           } catch (error) {
             logger.warn(
               {
                 error: error instanceof Error ? error.message : String(error),
-                folderId
+                folderId,
               },
-              'Failed to check file embedding status (continuing anyway)'
+              'Failed to check file embedding status (continuing anyway)',
             );
           }
         }
@@ -1719,32 +1872,37 @@ export class TaskProcessor {
 
     let agentFilePath: string | undefined;
     const agentFileName = 'agent.af';
-    
+
     if (taskPayload.agent_file_path) {
       logger.debug(
         { taskId: taskPayload.task_id, url: taskPayload.agent_file_path },
-        'PrepareFiles: downloading agent file'
+        'PrepareFiles: downloading agent file',
       );
       let agentContent = await this.downloadFileWithBackup(
         taskPayload.agent_file_path,
-        (taskPayload as any).agent_backup_file_path
+        (taskPayload as any).agent_backup_file_path,
       );
-      
+
       // If we have a folder_id, update the agent file to reference it
       if (folderId) {
         try {
           const originalContent = agentContent;
-          agentContent = this.updateAgentFileWithFolderId(agentContent, folderId, taskPayload.task_id);
-          
+          agentContent = this.updateAgentFileWithFolderId(
+            agentContent,
+            folderId,
+            taskPayload.task_id,
+          );
+
           // Verify folder_id was actually set in the agent file
           try {
             const agentData = JSON.parse(agentContent);
             const agent = agentData.agents?.[0];
             if (agent) {
-              const hasFolderId = agent.folder_ids?.includes(folderId) || 
-                                  agent.source_ids?.some((sid: any) => sid === folderId) ||
-                                  agent.sources?.some((src: any) => src.id === folderId);
-              
+              const hasFolderId =
+                agent.folder_ids?.includes(folderId) ||
+                agent.source_ids?.some((sid: any) => sid === folderId) ||
+                agent.sources?.some((src: any) => src.id === folderId);
+
               if (hasFolderId) {
                 logger.debug(
                   {
@@ -1752,9 +1910,9 @@ export class TaskProcessor {
                     folderId,
                     folderIds: agent.folder_ids,
                     sourceIds: agent.source_ids,
-                    sourcesCount: agent.sources?.length
+                    sourcesCount: agent.sources?.length,
                   },
-                  'Verified folder_id is set in agent file'
+                  'Verified folder_id is set in agent file',
                 );
               } else {
                 logger.warn(
@@ -1763,57 +1921,69 @@ export class TaskProcessor {
                     folderId,
                     folderIds: agent.folder_ids,
                     sourceIds: agent.source_ids,
-                    sourcesCount: agent.sources?.length
+                    sourcesCount: agent.sources?.length,
                   },
-                  'WARNING: folder_id may not be correctly set in agent file - agent may not be able to access files'
+                  'WARNING: folder_id may not be correctly set in agent file - agent may not be able to access files',
                 );
               }
             }
           } catch (verifyError) {
             logger.warn(
-              { error: verifyError instanceof Error ? verifyError.message : String(verifyError), taskId: taskPayload.task_id },
-              'Failed to verify folder_id in updated agent file'
+              {
+                error: verifyError instanceof Error ? verifyError.message : String(verifyError),
+                taskId: taskPayload.task_id,
+              },
+              'Failed to verify folder_id in updated agent file',
             );
           }
         } catch (error) {
           logger.warn(
-            { error: error instanceof Error ? error.message : String(error), taskId: taskPayload.task_id },
-            'Failed to update agent file with folder ID (agent file may not be valid JSON or have unexpected structure)'
+            {
+              error: error instanceof Error ? error.message : String(error),
+              taskId: taskPayload.task_id,
+            },
+            'Failed to update agent file with folder ID (agent file may not be valid JSON or have unexpected structure)',
           );
         }
       } else {
         logger.warn(
           { taskId: taskPayload.task_id },
-          'No folder_id available - agent will not have access to filesystem data files'
+          'No folder_id available - agent will not have access to filesystem data files',
         );
       }
-      
+
       // Override DeepSeek/OpenRouter with Chutes if CHUTES_API_KEY is available
       try {
         agentContent = this.maybeOverrideDeepSeekWithChutes(agentContent, taskPayload.task_id);
       } catch (error) {
         logger.warn(
-          { error: error instanceof Error ? error.message : String(error), taskId: taskPayload.task_id },
-          'Failed to override DeepSeek with Chutes'
+          {
+            error: error instanceof Error ? error.message : String(error),
+            taskId: taskPayload.task_id,
+          },
+          'Failed to override DeepSeek with Chutes',
         );
       }
 
       agentFilePath = path.join(workDir, agentFileName);
       await fs.writeFile(agentFilePath, agentContent, 'utf-8');
-      
+
       // Log where the agent file is and a truncated preview of its contents
       // This helps debug exactly what is being sent to Letta via letta-evals
       const previewLength = 2000; // Prevent logging extremely large files
       const agentPreview = agentContent.substring(0, previewLength);
-      
-      logger.debug({
-        taskId: taskPayload.task_id,
-        agentFilePath,
-        previewLength: agentContent.length,
-        previewTruncated: agentContent.length > previewLength,
-        folderId,
-        agentPreview
-      }, 'PrepareFiles: downloaded agent file (preview)');
+
+      logger.debug(
+        {
+          taskId: taskPayload.task_id,
+          agentFilePath,
+          previewLength: agentContent.length,
+          previewTruncated: agentContent.length > previewLength,
+          folderId,
+          agentPreview,
+        },
+        'PrepareFiles: downloaded agent file (preview)',
+      );
     }
 
     // Download and write dataset
@@ -1823,37 +1993,50 @@ export class TaskProcessor {
     if (dataset) {
       logger.debug(
         { taskId: taskPayload.task_id, url: dataset },
-        'PrepareFiles: downloading dataset'
+        'PrepareFiles: downloading dataset',
       );
-      if (dataset.startsWith('http://') || dataset.startsWith('https://') || dataset.startsWith('base64:')) {
+      if (
+        dataset.startsWith('http://') ||
+        dataset.startsWith('https://') ||
+        dataset.startsWith('base64:')
+      ) {
         // Download from URL or decode from base64
         const datasetContent = await this.downloadFileWithBackup(
           dataset,
-          (taskPayload as any).dataset_backup_file_path
+          (taskPayload as any).dataset_backup_file_path,
         );
 
         datasetPath = path.join(workDir, 'dataset.jsonl');
-        
+
         // Convert CSV to JSONL if needed
         let finalContent = datasetContent;
         if (this.isCsvContent(datasetContent)) {
-          logger.debug({ taskId: taskPayload.task_id, datasetPath }, 'PrepareFiles: converting CSV to JSONL');
+          logger.debug(
+            { taskId: taskPayload.task_id, datasetPath },
+            'PrepareFiles: converting CSV to JSONL',
+          );
           finalContent = this.csvToJsonl(datasetContent);
         }
-        
+
         await fs.writeFile(datasetPath, finalContent, 'utf-8');
         try {
           await this.validateDataset(datasetPath);
-          logger.debug({ taskId: taskPayload.task_id, datasetPath }, 'PrepareFiles: downloaded and validated dataset file');
+          logger.debug(
+            { taskId: taskPayload.task_id, datasetPath },
+            'PrepareFiles: downloaded and validated dataset file',
+          );
         } catch (error) {
           // Re-throw with more context
           const errorMessage = error instanceof Error ? error.message : String(error);
-          logger.error({
-            taskId: taskPayload.task_id,
-            datasetPath,
-            error: errorMessage,
-            firstLine: finalContent.split('\n')[0]?.substring(0, 200)
-          }, 'PrepareFiles: dataset validation failed');
+          logger.error(
+            {
+              taskId: taskPayload.task_id,
+              datasetPath,
+              error: errorMessage,
+              firstLine: finalContent.split('\n')[0]?.substring(0, 200),
+            },
+            'PrepareFiles: dataset validation failed',
+          );
           throw error;
         }
       } else {
@@ -1865,30 +2048,42 @@ export class TaskProcessor {
     // Download and write rubric (required)
     const rubricPath: string = path.join(workDir, 'rubric.txt');
     if (!taskPayload.rubric_file_path) {
-      throw new Error(`Rubric file path is required but not provided for task ${taskPayload.task_id}`);
+      throw new Error(
+        `Rubric file path is required but not provided for task ${taskPayload.task_id}`,
+      );
     }
-    
-    logger.debug({ taskId: taskPayload.task_id, url: taskPayload.rubric_file_path }, 'PrepareFiles: downloading rubric');
+
+    logger.debug(
+      { taskId: taskPayload.task_id, url: taskPayload.rubric_file_path },
+      'PrepareFiles: downloading rubric',
+    );
     const rubricContent = await this.downloadFileWithBackup(
       taskPayload.rubric_file_path,
-      (taskPayload as any).rubric_backup_file_path
+      (taskPayload as any).rubric_backup_file_path,
     );
     await fs.writeFile(rubricPath, rubricContent, 'utf-8');
-    logger.debug({ taskId: taskPayload.task_id, rubricPath }, 'PrepareFiles: downloaded rubric file');
+    logger.debug(
+      { taskId: taskPayload.task_id, rubricPath },
+      'PrepareFiles: downloaded rubric file',
+    );
 
     // Override base_url to use validator's configured Letta server
     let targetBaseUrl: string | undefined;
     if (process.env.LETTA_BASE_URL) {
       targetBaseUrl = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
     }
-    
-    if (targetBaseUrl && !targetBaseUrl.startsWith('http://') && !targetBaseUrl.startsWith('https://')) {
+
+    if (
+      targetBaseUrl &&
+      !targetBaseUrl.startsWith('http://') &&
+      !targetBaseUrl.startsWith('https://')
+    ) {
       throw new Error(`Invalid base_url: "${targetBaseUrl}" - must start with http:// or https://`);
     }
 
     // Create suite.yaml from provided suite_file_path file
     const suitePath = path.join(workDir, 'suite.yaml');
-    
+
     if (!taskPayload.suite_file_path || typeof taskPayload.suite_file_path !== 'string') {
       throw new Error('suite_file_path is required but was not provided in task payload');
     }
@@ -1896,28 +2091,28 @@ export class TaskProcessor {
     // Use provided suite.yaml file, but override base_url and ensure dataset path is correct
     logger.debug(
       { taskId: taskPayload.task_id, url: taskPayload.suite_file_path },
-      'PrepareFiles: downloading suite.yaml'
+      'PrepareFiles: downloading suite.yaml',
     );
     const suiteYamlContent = await this.downloadFileWithBackup(
       taskPayload.suite_file_path,
-      (taskPayload as any).suite_backup_file_path
+      (taskPayload as any).suite_backup_file_path,
     );
-    
+
     // Validate original suite.yaml can be parsed and dumped back correctly
     // This helps catch corruption issues before we modify it
     let suiteConfig: any;
     try {
       suiteConfig = yaml.load(suiteYamlContent) as any;
-      
+
       // Minimal logging: just log top-level keys to avoid large payloads
       logger.debug(
         {
           taskId: taskPayload.task_id,
           parsedSuiteConfigKeys: Object.keys(suiteConfig || {}),
         },
-        'Parsed suite.yaml config'
+        'Parsed suite.yaml config',
       );
-      
+
       // Test that we can dump and reload the original config without corruption
       const testDump = yaml.dump(suiteConfig, {
         lineWidth: -1,
@@ -1937,33 +2132,35 @@ export class TaskProcessor {
           errorStack: parseError instanceof Error ? parseError.stack : undefined,
           suiteYamlLength: suiteYamlContent.length,
         },
-        'Failed to parse or validate suite.yaml file'
+        'Failed to parse or validate suite.yaml file',
       );
-      throw new Error(`Failed to parse suite.yaml: ${parseError instanceof Error ? parseError.message : String(parseError)}`);
+      throw new Error(
+        `Failed to parse suite.yaml: ${parseError instanceof Error ? parseError.message : String(parseError)}`,
+      );
     }
-    
+
     if (!suiteConfig) {
       logger.error(
         {
           taskId: taskPayload.task_id,
         },
-        'Parsed suite.yaml is null or undefined'
+        'Parsed suite.yaml is null or undefined',
       );
       throw new Error('Failed to parse provided suite.yaml file: result is null/undefined');
     }
-    
+
     // Modify suite config programmatically for reliable updates
     // Update dataset path
     if (datasetPath) {
       const datasetBasename = path.basename(datasetPath);
       suiteConfig.dataset = datasetBasename;
     }
-    
+
     // Update target.base_url
     if (targetBaseUrl && suiteConfig.target) {
       suiteConfig.target.base_url = targetBaseUrl;
     }
-    
+
     // Update target.agent_file
     if (agentFilePath && suiteConfig.target) {
       const agentBasename = path.basename(agentFilePath);
@@ -1972,17 +2169,17 @@ export class TaskProcessor {
 
     // Update agent_design and blacklist grader's agent_file_path if they exist in suite.yaml
     // The graders should already be configured in suite.yaml, we just update the path
-    const agentFileFullPath = agentFilePath 
+    const agentFileFullPath = agentFilePath
       ? path.join(workDir, path.basename(agentFilePath))
       : path.join(workDir, 'agent.af');
-    
+
     if (suiteConfig.graders?.agent_design?.extractor_config) {
       suiteConfig.graders.agent_design.extractor_config.agent_file_path = agentFileFullPath;
     }
     if (suiteConfig.graders?.blacklist?.extractor_config) {
       suiteConfig.graders.blacklist.extractor_config.agent_file_path = agentFileFullPath;
     }
-    
+
     // Dump the modified config back to YAML
     let updatedYamlContent: string;
     try {
@@ -1998,11 +2195,13 @@ export class TaskProcessor {
           taskId: taskPayload.task_id,
           error: dumpError instanceof Error ? dumpError.message : String(dumpError),
         },
-        'Failed to dump modified suite config to YAML'
+        'Failed to dump modified suite config to YAML',
       );
-      throw new Error(`Failed to dump suite.yaml: ${dumpError instanceof Error ? dumpError.message : String(dumpError)}`);
+      throw new Error(
+        `Failed to dump suite.yaml: ${dumpError instanceof Error ? dumpError.message : String(dumpError)}`,
+      );
     }
-    
+
     logger.debug(
       {
         taskId: taskPayload.task_id,
@@ -2013,9 +2212,9 @@ export class TaskProcessor {
           cheatingDetectionInjected: true,
         },
       },
-      'Modified suite.yaml programmatically'
+      'Modified suite.yaml programmatically',
     );
-    
+
     // Validate the updated YAML can still be parsed
     try {
       const validationCheck = yaml.load(updatedYamlContent);
@@ -2028,28 +2227,29 @@ export class TaskProcessor {
           taskId: taskPayload.task_id,
           reloadedConfigKeys: Object.keys(validationCheck || {}),
         },
-        'Updated YAML validation passed'
+        'Updated YAML validation passed',
       );
     } catch (validationError) {
       logger.error(
         {
           taskId: taskPayload.task_id,
-          error: validationError instanceof Error ? validationError.message : String(validationError),
+          error:
+            validationError instanceof Error ? validationError.message : String(validationError),
           errorStack: validationError instanceof Error ? validationError.stack : undefined,
-            updatedYamlLength: updatedYamlContent.length,
+          updatedYamlLength: updatedYamlContent.length,
         },
-        'Failed to validate updated YAML - using original content as fallback'
+        'Failed to validate updated YAML - using original content as fallback',
       );
       // Fallback: use original content if validation fails
       updatedYamlContent = suiteYamlContent;
       logger.warn(
         { taskId: taskPayload.task_id },
-        'Used original suite.yaml content due to validation failure'
+        'Used original suite.yaml content due to validation failure',
       );
     }
-    
+
     await fs.writeFile(suitePath, updatedYamlContent, 'utf-8');
-    
+
     // Verify the file was written correctly by reading it back (no large previews)
     const writtenContent = await fs.readFile(suitePath, 'utf-8');
     if (writtenContent !== updatedYamlContent) {
@@ -2059,21 +2259,21 @@ export class TaskProcessor {
           expectedLength: updatedYamlContent.length,
           writtenLength: writtenContent.length,
         },
-        'Written suite.yaml content does not match expected content'
+        'Written suite.yaml content does not match expected content',
       );
     }
-    
+
     // Copy agent_design.py to work directory if agent_design or blacklist grader exists
     if (suiteConfig.graders?.agent_design || suiteConfig.graders?.blacklist) {
       const agentDesignPath = path.join(workDir, 'agent_design.py');
       // Use absolute path to Python file in Docker container
       const agentDesignSource = '/app/python/agent_design.py';
-      
+
       try {
         await fs.copyFile(agentDesignSource, agentDesignPath);
         logger.debug(
           { taskId: taskPayload.task_id, agentDesignPath },
-          'PrepareFiles: copied agent_design.py to work directory'
+          'PrepareFiles: copied agent_design.py to work directory',
         );
       } catch (error) {
         logger.error(
@@ -2083,7 +2283,7 @@ export class TaskProcessor {
             dest: agentDesignPath,
             error: error instanceof Error ? error.message : String(error),
           },
-          'PrepareFiles: failed to copy agent_design.py'
+          'PrepareFiles: failed to copy agent_design.py',
         );
         // Don't fail the entire task - grader might not be used
       }
@@ -2098,7 +2298,7 @@ export class TaskProcessor {
         await fs.copyFile(trajectoryGradersSource, trajectoryGradersPath);
         logger.debug(
           { taskId: taskPayload.task_id, trajectoryGradersPath },
-          'PrepareFiles: copied trajectory_graders.py to work directory'
+          'PrepareFiles: copied trajectory_graders.py to work directory',
         );
       } catch (error) {
         logger.error(
@@ -2108,18 +2308,21 @@ export class TaskProcessor {
             dest: trajectoryGradersPath,
             error: error instanceof Error ? error.message : String(error),
           },
-          'PrepareFiles: failed to copy trajectory_graders.py'
+          'PrepareFiles: failed to copy trajectory_graders.py',
         );
       }
     }
 
-    logger.debug({
-      taskId: taskPayload.task_id,
-      suitePath,
-      targetBaseUrl,
-      agentFilePath: agentFilePath ? path.basename(agentFilePath) : undefined,
-      datasetPath: datasetPath ? path.basename(datasetPath) : undefined,
-    }, 'PrepareFiles: updated suite.yaml');
+    logger.debug(
+      {
+        taskId: taskPayload.task_id,
+        suitePath,
+        targetBaseUrl,
+        agentFilePath: agentFilePath ? path.basename(agentFilePath) : undefined,
+        datasetPath: datasetPath ? path.basename(datasetPath) : undefined,
+      },
+      'PrepareFiles: updated suite.yaml',
+    );
 
     return {
       suitePath,
@@ -2139,26 +2342,26 @@ export class TaskProcessor {
   private async splitDatasetIntoBatches(
     datasetPath: string,
     batchSize: number,
-    workDir: string
+    workDir: string,
   ): Promise<string[]> {
     const content = await fs.readFile(datasetPath, 'utf-8');
-    const lines = content.split('\n').filter(line => line.trim());
-    
+    const lines = content.split('\n').filter((line) => line.trim());
+
     const batchPaths: string[] = [];
     const totalBatches = Math.ceil(lines.length / batchSize);
-    
+
     for (let i = 0; i < totalBatches; i++) {
       const batchLines = lines.slice(i * batchSize, (i + 1) * batchSize);
       const batchPath = path.join(workDir, `dataset_batch_${i}.jsonl`);
       await fs.writeFile(batchPath, batchLines.join('\n') + '\n', 'utf-8');
       batchPaths.push(batchPath);
     }
-    
+
     logger.debug(
       { datasetPath, batchSize, totalBatches, totalSamples: lines.length },
-      'Split dataset into batches'
+      'Split dataset into batches',
     );
-    
+
     return batchPaths;
   }
 
@@ -2169,18 +2372,18 @@ export class TaskProcessor {
     originalSuitePath: string,
     batchDatasetPath: string,
     workDir: string,
-    batchIndex: number
+    batchIndex: number,
   ): Promise<string> {
     const suiteContent = await fs.readFile(originalSuitePath, 'utf-8');
     const suiteConfig = yaml.load(suiteContent) as any;
-    
+
     // Update dataset path to point to batch dataset
     suiteConfig.dataset = path.basename(batchDatasetPath);
-    
+
     const batchSuitePath = path.join(workDir, `suite_batch_${batchIndex}.yaml`);
     const batchSuiteContent = yaml.dump(suiteConfig);
     await fs.writeFile(batchSuitePath, batchSuiteContent, 'utf-8');
-    
+
     return batchSuitePath;
   }
 
@@ -2189,55 +2392,60 @@ export class TaskProcessor {
    */
   private calculateTotalTokensFromResults(results: unknown[]): number {
     let totalTokens = 0;
-    
+
     for (const result of results) {
       if (typeof result !== 'object' || result === null) continue;
-      
+
       const resultObj = result as Record<string, unknown>;
       const resultData = resultObj.result as Record<string, unknown> | undefined;
-      
+
       if (!resultData) continue;
-      
+
       // Sum agent tokens
-      const agentUsage = resultData.agent_usage as Array<{
-        total_tokens?: number;
-        [key: string]: unknown;
-      }> | undefined;
-      
+      const agentUsage = resultData.agent_usage as
+        | Array<{
+            total_tokens?: number;
+            [key: string]: unknown;
+          }>
+        | undefined;
+
       if (agentUsage && Array.isArray(agentUsage) && agentUsage.length > 0) {
         const agentTokens = agentUsage.reduce((sum, usage) => {
           return sum + (usage.total_tokens || 0);
         }, 0);
         totalTokens += agentTokens;
       }
-      
+
       // Add grading tokens from all graders
-      const grades = resultData.grades as Record<string, { 
-        metadata?: { usage?: { total_tokens?: number } };
-        [key: string]: unknown;
-      }> | undefined;
-      
+      const grades = resultData.grades as
+        | Record<
+            string,
+            {
+              metadata?: { usage?: { total_tokens?: number } };
+              [key: string]: unknown;
+            }
+          >
+        | undefined;
+
       if (grades) {
         for (const graderName of Object.keys(grades)) {
           const grader = grades[graderName];
-          const graderMetadata = grader?.metadata as { usage?: { total_tokens?: number } } | undefined;
+          const graderMetadata = grader?.metadata as
+            { usage?: { total_tokens?: number } } | undefined;
           if (graderMetadata?.usage?.total_tokens) {
             totalTokens += graderMetadata.usage.total_tokens;
           }
         }
       }
     }
-    
+
     return totalTokens;
   }
 
   /**
    * Create a zero-score result for padding
    */
-  private createZeroScoreResult(
-    sampleId: string,
-    reason: string
-  ): unknown {
+  private createZeroScoreResult(sampleId: string, reason: string): unknown {
     return {
       sample: {
         id: sampleId,
@@ -2280,7 +2488,7 @@ export class TaskProcessor {
    */
   private async runEvaluation(
     suitePath: string,
-    outputDir: string
+    outputDir: string,
   ): Promise<{
     summary: Record<string, unknown> | null;
     results: unknown[];
@@ -2301,29 +2509,29 @@ export class TaskProcessor {
     if (this.lettaClient) {
       try {
         const agentsBefore = await this.lettaClient.listAgents();
-        agentsBeforeEvaluation = new Set(agentsBefore.map(a => a.id));
+        agentsBeforeEvaluation = new Set(agentsBefore.map((a) => a.id));
         logger.debug(
           { agentCount: agentsBeforeEvaluation.size },
-          'Tracked agents before evaluation for cleanup'
+          'Tracked agents before evaluation for cleanup',
         );
       } catch (error) {
         logger.warn(
           { error: error instanceof Error ? error.message : String(error) },
-          'Failed to list agents before evaluation (cleanup may be incomplete)'
+          'Failed to list agents before evaluation (cleanup may be incomplete)',
         );
       }
-      
+
       try {
         const foldersBefore = await this.lettaClient.listFolders();
-        foldersBeforeEvaluation = new Set(foldersBefore.map(f => f.id));
+        foldersBeforeEvaluation = new Set(foldersBefore.map((f) => f.id));
         logger.debug(
           { folderCount: foldersBeforeEvaluation.size },
-          'Tracked folders before evaluation for cleanup'
+          'Tracked folders before evaluation for cleanup',
         );
       } catch (error) {
         logger.warn(
           { error: error instanceof Error ? error.message : String(error) },
-          'Failed to list folders before evaluation (cleanup may be incomplete)'
+          'Failed to list folders before evaluation (cleanup may be incomplete)',
         );
       }
     }
@@ -2331,12 +2539,12 @@ export class TaskProcessor {
     // Run letta-evals via python module to avoid relying on shell scripts
     const pythonCmd = process.env.LETTA_EVALS_PYTHON || 'python3';
     const cliModule = process.env.LETTA_EVALS_MODULE || 'letta_evals.cli';
-    
+
     // Read MAX_CONCURRENT_EVALS for batch processing
     const maxConcurrentEvals = process.env.MAX_CONCURRENT_EVALS
       ? Math.min(parseInt(process.env.MAX_CONCURRENT_EVALS, 10), 20) // Cap at 20
       : 2; // Default: 2 (for testing token limit)
-    
+
     // Verify dataset file exists before validation/execution
     // Parse suite.yaml to get dataset path
     let originalDatasetPath: string | null = null;
@@ -2345,82 +2553,96 @@ export class TaskProcessor {
       const suiteYamlContent = await fs.readFile(suitePath, 'utf-8');
       const suiteConfig = yaml.load(suiteYamlContent) as any;
       if (suiteConfig?.dataset) {
-        const datasetPath = path.isAbsolute(suiteConfig.dataset) 
-          ? suiteConfig.dataset 
+        const datasetPath = path.isAbsolute(suiteConfig.dataset)
+          ? suiteConfig.dataset
           : path.join(suiteDir, suiteConfig.dataset);
-        
+
         originalDatasetPath = datasetPath;
-        
+
         try {
           await fs.access(datasetPath);
           const stats = await fs.stat(datasetPath);
           if (stats.size === 0) {
             throw new Error(`Dataset file is empty: ${datasetPath}`);
           }
-          
+
           // Count total samples for padding
           const datasetContent = await fs.readFile(datasetPath, 'utf-8');
-          totalSamples = datasetContent.split('\n').filter(line => line.trim()).length;
+          totalSamples = datasetContent.split('\n').filter((line) => line.trim()).length;
         } catch (error) {
           logger.error(
-            { 
-              datasetPath, 
+            {
+              datasetPath,
               suiteDataset: suiteConfig.dataset,
               suiteDir,
-              error: error instanceof Error ? error.message : String(error)
+              error: error instanceof Error ? error.message : String(error),
             },
-            'Dataset file not accessible - letta-evals will fail'
+            'Dataset file not accessible - letta-evals will fail',
           );
-          throw new Error(`Dataset file not accessible: ${datasetPath}. ${error instanceof Error ? error.message : String(error)}`);
+          throw new Error(
+            `Dataset file not accessible: ${datasetPath}. ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
       }
     } catch (error) {
       if (error instanceof Error && error.message.includes('Dataset file not accessible')) {
         throw error;
       }
-      logger.warn({ error: error instanceof Error ? error.message : String(error) }, 'Could not verify dataset file (suite.yaml may use external dataset)');
+      logger.warn(
+        { error: error instanceof Error ? error.message : String(error) },
+        'Could not verify dataset file (suite.yaml may use external dataset)',
+      );
     }
-    
+
     // Calculate max tokens per evaluation
     // Priority: MAX_TOKENS_PER_EVAL (override) > TOKENS_PER_TEST_CASE * totalSamples (calculated)
     const ABSOLUTE_MAX_TOKENS = 10000000; // 10 million tokens absolute maximum
-    
+
     let maxTokensPerEval: number;
     let tokensPerTestCase: number | null = null;
     let calculatedMaxTokens: number | null = null;
     let usingOverrideMode = false;
-    
+
     if (process.env.MAX_TOKENS_PER_EVAL) {
       // Override mode: use MAX_TOKENS_PER_EVAL directly
       maxTokensPerEval = parseInt(process.env.MAX_TOKENS_PER_EVAL, 10);
       usingOverrideMode = true;
       logger.info(
         { maxTokensPerEval, absoluteMaxCap: ABSOLUTE_MAX_TOKENS },
-        'Using MAX_TOKENS_PER_EVAL override mode'
+        'Using MAX_TOKENS_PER_EVAL override mode',
       );
     } else {
       // Calculated mode: TOKENS_PER_TEST_CASE * totalSamples
       tokensPerTestCase = process.env.TOKENS_PER_TEST_CASE
         ? parseInt(process.env.TOKENS_PER_TEST_CASE, 10)
         : 30000; // Default: 30,000 tokens per test case
-      
+
       if (totalSamples > 0) {
         calculatedMaxTokens = tokensPerTestCase * totalSamples;
         maxTokensPerEval = calculatedMaxTokens;
         logger.info(
-          { tokensPerTestCase, totalSamples, calculatedMaxTokens, absoluteMaxCap: ABSOLUTE_MAX_TOKENS },
-          'Using calculated token limit (TOKENS_PER_TEST_CASE * totalSamples)'
+          {
+            tokensPerTestCase,
+            totalSamples,
+            calculatedMaxTokens,
+            absoluteMaxCap: ABSOLUTE_MAX_TOKENS,
+          },
+          'Using calculated token limit (TOKENS_PER_TEST_CASE * totalSamples)',
         );
       } else {
         // No dataset or can't count samples - use default
         maxTokensPerEval = tokensPerTestCase;
         logger.info(
-          { tokensPerTestCase, maxTokensPerEval, absoluteMaxCap: ABSOLUTE_MAX_TOKENS },
-          'Using default token limit (no dataset found)'
+          {
+            tokensPerTestCase,
+            maxTokensPerEval,
+            absoluteMaxCap: ABSOLUTE_MAX_TOKENS,
+          },
+          'Using default token limit (no dataset found)',
         );
       }
     }
-    
+
     // Apply absolute maximum cap
     const finalMaxTokens = Math.min(maxTokensPerEval, ABSOLUTE_MAX_TOKENS);
     if (finalMaxTokens < maxTokensPerEval) {
@@ -2429,730 +2651,771 @@ export class TaskProcessor {
           originalMaxTokens: maxTokensPerEval,
           absoluteMaxCap: ABSOLUTE_MAX_TOKENS,
           finalMaxTokens,
-          cappedBy: finalMaxTokens === ABSOLUTE_MAX_TOKENS ? 'absolute_max' : 'unknown'
+          cappedBy: finalMaxTokens === ABSOLUTE_MAX_TOKENS ? 'absolute_max' : 'unknown',
         },
-        'Token limit capped by absolute maximum'
+        'Token limit capped by absolute maximum',
       );
     }
     maxTokensPerEval = finalMaxTokens;
-    
+
     // If no token limit is configured or no dataset, run normally (no batching)
     const useBatching = maxTokensPerEval > 0 && originalDatasetPath !== null;
-    
-    try {
-    if (useBatching) {
-      logger.info(
-        {
-          maxTokensPerEval,
-          maxConcurrentEvals,
-          totalSamples,
-          datasetPath: originalDatasetPath,
-          tokensPerTestCase: tokensPerTestCase ?? undefined,
-          calculatedMaxTokens: calculatedMaxTokens ?? undefined,
-          absoluteMaxCap: ABSOLUTE_MAX_TOKENS,
-          usingOverrideMode
-        },
-        'Using batch processing with token limit'
-      );
-    }
-    
-    // First, validate the suite configuration
-    const validateCmd = `${pythonCmd} -m ${cliModule} validate "${suiteFile}"`;
-    logger.debug({ validateCmd, cwd: suiteDir }, 'Validating suite.yaml');
-    
-    try {
-      const { stdout: validateStdout, stderr: validateStderr } = await execAsync(validateCmd, {
-        cwd: suiteDir,
-        env: process.env,
-        maxBuffer: 1024 * 1024 // 1MB for validation output
-      });
-      
-      if (validateStdout) {
-        logger.debug({ stdout: validateStdout }, 'Suite validation stdout');
-      }
-      if (validateStderr) {
-        logger.warn({ stderr: validateStderr }, 'Suite validation stderr');
-      }
-      logger.debug('Suite validation passed');
-    } catch (error: any) {
-      const validateStdout = error?.stdout || '';
-      const validateStderr = error?.stderr || '';
-      const validateMessage = error instanceof Error ? error.message : String(error);
-      
-      logger.error(
-        {
-          error: validateMessage,
-          stdout: validateStdout || undefined,
-          stderr: validateStderr || undefined,
-          suitePath,
-        },
-        'Suite validation failed'
-      );
-      
-      throw new Error(`Suite validation failed: ${validateMessage}${validateStderr ? '\n' + validateStderr : ''}`);
-    }
 
-    // Prepare for batch processing or single evaluation
-    let results: unknown[] = [];
-    let summary: Record<string, unknown> | null = null;
-    const allResults: unknown[] = [];
-    const allSummaries: Record<string, unknown>[] = [];
-    let totalTokensUsed = 0;
-    const batchFilesToCleanup: string[] = [];
-    
-    if (useBatching) {
-      // Split dataset into batches
-      const batchPaths = await this.splitDatasetIntoBatches(
-        originalDatasetPath!,
-        maxConcurrentEvals,
-        outputDir
-      );
-      batchFilesToCleanup.push(...batchPaths);
-      
-      logger.info(
-        { batchCount: batchPaths.length, batchSize: maxConcurrentEvals },
-        'Split dataset into batches for token-limited evaluation'
-      );
-      
-      // Process batches sequentially
-      for (let batchIndex = 0; batchIndex < batchPaths.length; batchIndex++) {
-        const batchDatasetPath = batchPaths[batchIndex];
-        const batchOutputDir = path.join(outputDir, `batch_${batchIndex}`);
-        await fs.mkdir(batchOutputDir, { recursive: true });
-        
-        // Create temporary suite.yaml for this batch
-        const batchSuitePath = await this.createBatchSuiteYaml(
-          suitePath,
-          batchDatasetPath,
-          outputDir,
-          batchIndex
-        );
-        batchFilesToCleanup.push(batchSuitePath);
-        
-        const batchSuiteFile = path.basename(batchSuitePath);
-        
-        logger.info(
-          { batchIndex: batchIndex + 1, totalBatches: batchPaths.length, batchDatasetPath },
-          'Processing batch'
-        );
-        
-        // Run evaluation for this batch
-        const batchCmd = `${pythonCmd} /app/python/run_with_graders.py run "${batchSuiteFile}" --output "${batchOutputDir}"`;
-        
-        try {
-          // Prepare environment variables (same as below)
-          const env: Record<string, string> = {
-            ...process.env,
-            PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
-          };
-          
-          // Add API keys and other env vars (same logic as below)
-          if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-          if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-          if (process.env.GOOGLE_API_KEY) env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
-          if (process.env.OPENROUTER_API_KEY) env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-          if (process.env.CHUTES_API_KEY) env.CHUTES_API_KEY = process.env.CHUTES_API_KEY;
-          if (process.env.TOGETHER_API_KEY) env.TOGETHER_API_KEY = process.env.TOGETHER_API_KEY;
-          if (process.env.TOGETHERAI_API_KEY) env.TOGETHERAI_API_KEY = process.env.TOGETHERAI_API_KEY;
-          if (process.env.GITHUB_TOKEN) env.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-          if (process.env.MAX_STEPS) env.MAX_STEPS = process.env.MAX_STEPS;
-          if (process.env.LETTA_BASE_URL) {
-            env.LETTA_BASE_URL = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
-          } else if (process.env.LETTA_URL) {
-            env.LETTA_BASE_URL = process.env.LETTA_URL.trim().replace(/^["']|["']$/g, '');
-          }
-          
-          // Run batch evaluation
-          let batchStdout = '';
-          let batchStderr = '';
-          let batchCommandFailed = false;
-          let batchGateFailed = false;
-          
-          try {
-            const batchResult = await execAsync(batchCmd, {
-              cwd: outputDir, // Use outputDir so batch suite.yaml is found
-              env,
-              maxBuffer: 10 * 1024 * 1024
-            });
-            batchStdout = batchResult.stdout || '';
-            batchStderr = batchResult.stderr || '';
-          } catch (error: any) {
-            // Command exited with non-zero code - check if it's just a gate failure
-            batchCommandFailed = true;
-            batchStdout = error.stdout || '';
-            batchStderr = error.stderr || '';
-            
-            // Check if this is a gate failure (results may still be valid)
-            const isGateFailure = batchStdout.includes('Some gates failed') || 
-                                 batchStdout.includes('Gate:') ||
-                                 batchStderr.includes('Some gates failed');
-            
-            if (isGateFailure) {
-              batchGateFailed = true;
-              // Log the nicely formatted stdout so user can see results
-              if (batchStdout) {
-                logger.info({ stdout: batchStdout }, 'Batch evaluation completed but gate failed - results below');
-              }
-              if (batchStderr && !batchStderr.includes('Some gates failed')) {
-                logger.warn({ stderr: batchStderr.substring(0, 500) }, 'letta-evals stderr output');
-              }
-            } else {
-              // Real error - log it but still try to parse results if they exist
-              logger.warn(
-                { 
-                  error: error.message,
-                  stdout: batchStdout.substring(0, 500),
-                  stderr: batchStderr.substring(0, 500)
-                },
-                'Batch evaluation command failed - will attempt to parse results if available'
-              );
-            }
-          }
-          
-          // Read batch results (even if command failed, results may still be valid)
-          const batchResultsPath = path.join(batchOutputDir, 'results.jsonl');
-          const batchSummaryPath = path.join(batchOutputDir, 'summary.json');
-          
-          const batchResults: unknown[] = [];
-          let batchSummary: Record<string, unknown> | null = null;
-          
-          try {
-            await fs.access(batchResultsPath);
-            const batchResultsContent = await fs.readFile(batchResultsPath, 'utf-8');
-            for (const line of batchResultsContent.split('\n')) {
-              const trimmed = line.trim();
-              if (trimmed) {
-                batchResults.push(JSON.parse(trimmed));
-              }
-            }
-          } catch (error) {
-            logger.warn({ error, batchResultsPath }, 'Failed to read batch results.jsonl');
-          }
-          
-          try {
-            await fs.access(batchSummaryPath);
-            const batchSummaryContent = await fs.readFile(batchSummaryPath, 'utf-8');
-            batchSummary = JSON.parse(batchSummaryContent);
-          } catch (error) {
-            logger.warn({ error, batchSummaryPath }, 'Failed to read batch summary.json');
-          }
-          
-          // If we got no results and it wasn't just a gate failure, that's a real error
-          if (batchResults.length === 0 && !batchGateFailed && batchCommandFailed) {
-            throw new Error(
-              'Batch evaluation failed and produced no results. ' +
-              'No summary.json or results.jsonl found. ' +
-              `Command error: ${batchStderr.substring(0, 500)}`
-            );
-          }
-          
-          // Calculate tokens used in this batch
-          const batchTokens = this.calculateTotalTokensFromResults(batchResults);
-          const tokensBeforeBatch = totalTokensUsed;
-          totalTokensUsed += batchTokens;
-          
-          logger.info(
-            {
-              batchIndex: batchIndex + 1,
-              batchTokens,
-              totalTokensUsed,
-              maxTokensPerEval,
-              batchResultsCount: batchResults.length
-            },
-            'Batch completed'
-          );
-          
-          // Check if this batch pushed us over the limit
-          if (totalTokensUsed >= maxTokensPerEval && tokensBeforeBatch < maxTokensPerEval) {
-            // This batch pushed us over the limit - need to pro-rate and zero out samples
-            const tokensRemaining = maxTokensPerEval - tokensBeforeBatch;
-            const tokensOverLimit = totalTokensUsed - maxTokensPerEval;
-            
-            logger.warn(
-              {
-                totalTokensUsed,
-                maxTokensPerEval,
-                tokensBeforeBatch,
-                tokensRemaining,
-                tokensOverLimit,
-                batchIndex: batchIndex + 1,
-                totalBatches: batchPaths.length
-              },
-              'Token limit reached during batch - pro-rating and zeroing samples'
-            );
-            
-            // Process batch results: pro-rate first sample that exceeded, zero out rest
-            const processedBatchResults: unknown[] = [];
-            let tokensProcessed = 0;
-            
-            for (let i = 0; i < batchResults.length; i++) {
-              const result = batchResults[i];
-              if (typeof result !== 'object' || result === null) {
-                processedBatchResults.push(result);
-                continue;
-              }
-              
-              const resultObj = result as Record<string, unknown>;
-              const resultData = resultObj.result as Record<string, unknown> | undefined;
-              
-              if (!resultData) {
-                processedBatchResults.push(result);
-                continue;
-              }
-              
-              // Calculate tokens for this sample
-              const sampleTokens = this.calculateTotalTokensFromResults([result]);
-              const tokensAfterThisSample = tokensBeforeBatch + tokensProcessed + sampleTokens;
-              
-              if (tokensAfterThisSample <= maxTokensPerEval) {
-                // This sample fits within the limit - add it fully
-                processedBatchResults.push(result);
-                tokensProcessed += sampleTokens;
-              } else if (tokensBeforeBatch + tokensProcessed < maxTokensPerEval) {
-                // This sample pushed us over - pro-rate it
-                const tokensAllowed = maxTokensPerEval - (tokensBeforeBatch + tokensProcessed);
-                const prorationFactor = tokensAllowed / sampleTokens;
-                
-                logger.info(
-                  {
-                    sampleIndex: i + 1,
-                    sampleTokens,
-                    tokensAllowed,
-                    prorationFactor,
-                    originalScore: (resultData.grade as { score?: number })?.score
-                  },
-                  'Pro-rating sample that exceeded token limit'
-                );
-                
-                // Pro-rate the score
-                // Note: Only pro-rate the rubric score, not gate scores (blacklist/agent_design)
-                // Gates should remain pass/fail (1.0 or 0), only the final rubric score is pro-rated
-                const grades = resultData.grades as Record<string, { score?: number; rationale?: string } | undefined>;
-                if (grades) {
-                  for (const graderName in grades) {
-                    const grader = grades[graderName];
-                    if (grader && typeof grader.score === 'number') {
-                      // Only pro-rate rubric score, keep gate scores as-is (they're pass/fail)
-                      if (graderName === 'scout_rubric_grader') {
-                        grader.score = Math.round(grader.score * prorationFactor * 1000) / 1000;
-                        grader.rationale = `${grader.rationale || ''} [Score pro-rated to ${(prorationFactor * 100).toFixed(1)}% due to token limit: ${tokensAllowed}/${sampleTokens} tokens allowed]`;
-                      } else {
-                        // For gate scores, add note but don't pro-rate (they're pass/fail)
-                        grader.rationale = `${grader.rationale || ''} [Evaluation partially completed due to token limit: ${tokensAllowed}/${sampleTokens} tokens allowed]`;
-                      }
-                    }
-                  }
-                }
-                
-                // Update main grade score
-                const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
-                if (grade && typeof grade.score === 'number') {
-                  grade.score = Math.round(grade.score * prorationFactor * 1000) / 1000;
-                  grade.rationale = `${grade.rationale || ''} [Score pro-rated to ${(prorationFactor * 100).toFixed(1)}% due to token limit]`;
-                }
-                
-                // Update weighted_score if present
-                if (typeof resultData.weighted_score === 'number') {
-                  resultData.weighted_score = Math.round(resultData.weighted_score * prorationFactor * 1000) / 1000;
-                }
-                
-                processedBatchResults.push(result);
-                tokensProcessed += tokensAllowed; // Only count the allowed portion
-              } else {
-                // This sample is after we already exceeded - zero it out
-                const sample = resultObj.sample as { id?: string } | undefined;
-                const sampleId = sample?.id || `sample_${i}`;
-                
-                logger.info(
-                  { sampleIndex: i + 1, sampleId },
-                  'Zeroing out sample that exceeded token limit'
-                );
-                
-                const zeroResult = this.createZeroScoreResult(
-                  sampleId,
-                  'Evaluation cancelled due to token limit exceeded'
-                );
-                processedBatchResults.push(zeroResult);
-                // Don't add tokens for zeroed samples
-              }
-            }
-            
-            // Add processed batch results
-            allResults.push(...processedBatchResults);
-            if (batchSummary) {
-              allSummaries.push(batchSummary);
-            }
-            
-            // Stop processing more batches
-            break;
-          } else {
-            // Batch fits within limit or we were already over - add results normally
-            allResults.push(...batchResults);
-            if (batchSummary) {
-              allSummaries.push(batchSummary);
-            }
-            
-            // Check if we've hit the token limit (shouldn't happen here, but check anyway)
-            if (totalTokensUsed >= maxTokensPerEval) {
-              logger.warn(
-                {
-                  totalTokensUsed,
-                  maxTokensPerEval,
-                  batchIndex: batchIndex + 1,
-                  totalBatches: batchPaths.length
-                },
-                'Token limit reached - stopping batch processing'
-              );
-              break; // Stop processing more batches
-            }
-          }
-        } catch (error: any) {
-          logger.error(
-            {
-              batchIndex: batchIndex + 1,
-              error: error instanceof Error ? error.message : String(error),
-              stdout: error?.stdout?.substring(0, 500),
-              stderr: error?.stderr?.substring(0, 500)
-            },
-            'Batch evaluation failed'
-          );
-          // Continue to next batch or stop if critical
-          throw error;
-        }
-      }
-      
-      // Pad remaining samples with zero scores
-      const evaluatedSamples = allResults.length;
-      const remainingSamples = totalSamples - evaluatedSamples;
-      
-      if (remainingSamples > 0) {
-        logger.info(
-          { evaluatedSamples, remainingSamples, totalSamples },
-          'Padding remaining samples with zero scores'
-        );
-        
-        // Read original dataset to get sample IDs for padding
-        const originalDatasetContent = await fs.readFile(originalDatasetPath!, 'utf-8');
-        const datasetLines = originalDatasetContent.split('\n').filter(line => line.trim());
-        
-        // Get IDs of evaluated samples
-        const evaluatedSampleIds = new Set<string>();
-        for (const result of allResults) {
-          if (typeof result === 'object' && result !== null) {
-            const resultObj = result as Record<string, unknown>;
-            const sample = resultObj.sample as { id?: string } | undefined;
-            if (sample?.id) {
-              evaluatedSampleIds.add(sample.id);
-            }
-          }
-        }
-        
-        // Create zero-score results for remaining samples
-        for (let i = 0; i < datasetLines.length; i++) {
-          try {
-            const sample = JSON.parse(datasetLines[i]);
-            if (sample.id && !evaluatedSampleIds.has(sample.id)) {
-              const zeroResult = this.createZeroScoreResult(
-                sample.id,
-                'Evaluation skipped due to token limit exceeded'
-              );
-              allResults.push(zeroResult);
-              
-              // Stop if we've padded all remaining samples
-              if (allResults.length >= totalSamples) {
-                break;
-              }
-            }
-          } catch (e) {
-            // Skip invalid JSON lines
-          }
-        }
-      }
-      
-      // Log summary of token limit processing for testing
+    try {
       if (useBatching) {
-        const scoreSummary = allResults.map((result: unknown, index: number) => {
-          if (typeof result !== 'object' || result === null) {
-            return { sample: index + 1, score: null, tokens: 0, status: 'invalid' };
-          }
-          
-          const resultObj = result as Record<string, unknown>;
-          const resultData = resultObj.result as Record<string, unknown> | undefined;
-          const sample = resultObj.sample as { id?: string } | undefined;
-          
-          if (!resultData) {
-            return { sample: index + 1, id: sample?.id, score: null, tokens: 0, status: 'no_result_data' };
-          }
-          
-          const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
-          const grades = resultData.grades as Record<string, { score?: number; rationale?: string }> | undefined;
-          const performance = resultData.performance as { total_tokens?: number } | undefined;
-          
-          const score = grade?.score ?? resultData.weighted_score ?? 0;
-          const tokens = performance?.total_tokens ?? 0;
-          
-          // Check if pro-rated
-          const isProrated = grade?.rationale?.includes('pro-rated') || 
-                            Object.values(grades || {}).some(g => g?.rationale?.includes('pro-rated'));
-          const isZeroed = grade?.rationale?.includes('cancelled') || 
-                          grade?.rationale?.includes('skipped');
-          
-          return {
-            sample: index + 1,
-            id: sample?.id,
-            score: typeof score === 'number' ? Math.round(score * 1000) / 1000 : null,
-            tokens,
-            status: isProrated ? 'prorated' : isZeroed ? 'zeroed' : 'full',
-            blacklist: grades?.blacklist?.score,
-            agent_design: grades?.agent_design?.score,
-            scout_rubric: grades?.scout_rubric_grader?.score,
-          };
-        });
-        
-        const validScores = scoreSummary.filter(s => s.score !== null && s.status !== 'zeroed');
-        const averageScore = validScores.length > 0
-          ? validScores.reduce((sum, s) => sum + (s.score || 0), 0) / validScores.length
-          : 0;
-        
         logger.info(
           {
-            totalTokensUsed,
             maxTokensPerEval,
+            maxConcurrentEvals,
             totalSamples,
-            evaluatedSamples: allResults.length,
+            datasetPath: originalDatasetPath,
             tokensPerTestCase: tokensPerTestCase ?? undefined,
             calculatedMaxTokens: calculatedMaxTokens ?? undefined,
             absoluteMaxCap: ABSOLUTE_MAX_TOKENS,
             usingOverrideMode,
-            scoreSummary,
-            averageScore: Math.round(averageScore * 1000) / 1000,
-            breakdown: {
-              full: scoreSummary.filter(s => s.status === 'full').length,
-              prorated: scoreSummary.filter(s => s.status === 'prorated').length,
-              zeroed: scoreSummary.filter(s => s.status === 'zeroed').length,
-            }
           },
-          'Token limit processing summary'
+          'Using batch processing with token limit',
         );
       }
-      
-      // Clean up temporary batch files
-      for (const filePath of batchFilesToCleanup) {
-        try {
-          await fs.unlink(filePath);
-        } catch (error) {
-          logger.debug({ error, filePath }, 'Failed to cleanup batch file (non-fatal)');
-        }
-      }
-      
-      // Now process the combined results (will continue below with existing processing logic)
-      // Set results and summary for processing
-      results = allResults;
-      
-      // Recalculate summary from combined results
-      if (allSummaries.length > 0 || results.length > 0) {
-        // We'll recalculate summary metrics below
-        summary = allSummaries[0] || {}; // Use first batch summary as template
-      }
-    }
-    
-    // Now run the evaluation using wrapper script (only if not using batching)
-    const stdout = '';
-    const stderr = '';
-    const commandFailed = false;
-    const gateFailed = false;
-    
-    if (!useBatching) {
-    const cmd = `${pythonCmd} /app/python/run_with_graders.py run "${suiteFile}" --output "${outputDir}"`;
-    logger.info({ cmd, cwd: suiteDir, outputDir }, 'Running letta-evals');
 
-    try {
-      // Prepare environment variables for letta-evals
-      // Pass through all model provider API keys
-      const env: Record<string, string> = {
-        ...process.env,
-        // Ensure Python path is available
-        PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
-      };
-
-      // Add model provider API keys (only if defined)
-      if (process.env.OPENAI_API_KEY) {
-        env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-      }
-      if (process.env.ANTHROPIC_API_KEY) {
-        env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-      }
-      if (process.env.GOOGLE_API_KEY) {
-        env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
-      }
-      if (process.env.OPENROUTER_API_KEY) {
-        env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
-      }
-      if (process.env.CHUTES_API_KEY) {
-        env.CHUTES_API_KEY = process.env.CHUTES_API_KEY;
-      }
-      if (process.env.TOGETHER_API_KEY) {
-        env.TOGETHER_API_KEY = process.env.TOGETHER_API_KEY;
-      }
-      if (process.env.TOGETHERAI_API_KEY) {
-        env.TOGETHERAI_API_KEY = process.env.TOGETHERAI_API_KEY;
-      }
-      // GitHub token for authenticated API requests (higher rate limits)
-      if (process.env.GITHUB_TOKEN) {
-        env.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-      }
-      // Max steps for agent tool calls (limits number of steps per evaluation)
-      if (process.env.MAX_STEPS) {
-        env.MAX_STEPS = process.env.MAX_STEPS;
-      }
-      // Max tokens per evaluation (limits total tokens used across all test cases)
-      if (process.env.MAX_TOKENS_PER_EVAL) {
-        env.MAX_TOKENS_PER_EVAL = process.env.MAX_TOKENS_PER_EVAL;
-      }
-      // Max concurrent evaluations (default: 10, max: 20)
-      if (process.env.MAX_CONCURRENT_EVALS) {
-        env.MAX_CONCURRENT_EVALS = process.env.MAX_CONCURRENT_EVALS;
-      }
-      // Letta - only support hosted instances
-      if (process.env.LETTA_BASE_URL) {
-        // Strip quotes if present (common when set in docker-compose or shell scripts)
-        env.LETTA_BASE_URL = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
-      } else if (process.env.LETTA_URL) {
-        // Strip quotes if present
-        env.LETTA_BASE_URL = process.env.LETTA_URL.trim().replace(/^["']|["']$/g, '');
-      }
-
-      // Log the exact command and environment for debugging
-      console.log('\n' + '='.repeat(80));
-      console.log('LETTA-EVALS COMMAND:');
-      console.log('='.repeat(80));
-      console.log(`Command: ${cmd}`);
-      console.log(`Working Directory: ${suiteDir}`);
-      console.log(`Output Directory: ${outputDir}`);
-      console.log(`Suite File: ${suiteFile}`);
-      console.log('\nEnvironment Variables (keys only, values hidden for security):');
-      const envKeys = Object.keys(env).sort();
-      for (const key of envKeys) {
-        const value = env[key];
-        // Show if set (but not the actual value for API keys)
-        if (key.includes('API_KEY') || key.includes('SECRET') || key.includes('PASSWORD') || key.includes('TOKEN')) {
-          console.log(`  ${key}=***SET*** (${value ? value.length : 0} chars)`);
-        } else if (key === 'PATH') {
-          console.log(`  ${key}=${value}`);
-        } else {
-          // For other vars, show first 50 chars if not sensitive
-          const preview = value && value.length > 50 ? value.substring(0, 50) + '...' : value;
-          console.log(`  ${key}=${preview}`);
-        }
-      }
-      console.log('='.repeat(80) + '\n');
-
-      let stdout = '';
-      let stderr = '';
-      let commandFailed = false;
-      let gateFailed = false;
+      // First, validate the suite configuration
+      const validateCmd = `${pythonCmd} -m ${cliModule} validate "${suiteFile}"`;
+      logger.debug({ validateCmd, cwd: suiteDir }, 'Validating suite.yaml');
 
       try {
-        const result = await execAsync(cmd, {
+        const { stdout: validateStdout, stderr: validateStderr } = await execAsync(validateCmd, {
           cwd: suiteDir,
-          env,
-          maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large outputs
+          env: process.env,
+          maxBuffer: 1024 * 1024, // 1MB for validation output
         });
-        stdout = result.stdout || '';
-        stderr = result.stderr || '';
+
+        if (validateStdout) {
+          logger.debug({ stdout: validateStdout }, 'Suite validation stdout');
+        }
+        if (validateStderr) {
+          logger.warn({ stderr: validateStderr }, 'Suite validation stderr');
+        }
+        logger.debug('Suite validation passed');
       } catch (error: any) {
-        // Command exited with non-zero code - check if it's just a gate failure
-        commandFailed = true;
-        stdout = error.stdout || '';
-        stderr = error.stderr || '';
-        
-        // Check if this is a gate failure (results may still be valid)
-        const isGateFailure = stdout.includes('Some gates failed') || 
-                             stdout.includes('Gate:') ||
-                             stderr.includes('Some gates failed');
-        
-        if (isGateFailure) {
-          gateFailed = true;
-          // Log the nicely formatted stdout so user can see results
-          if (stdout) {
-            logger.info({ stdout }, 'Evaluation completed but gate failed - results below');
-          }
-          if (stderr && !stderr.includes('Some gates failed')) {
-            logger.warn({ stderr: stderr.substring(0, 500) }, 'letta-evals stderr output');
-          }
-        } else {
-          // Real error - log it but still try to parse results if they exist
-          logger.warn(
-            { 
-              error: error.message,
-              stdout: stdout.substring(0, 500),
-              stderr: stderr.substring(0, 500)
-            },
-            'Evaluation command failed - will attempt to parse results if available'
+        const validateStdout = error?.stdout || '';
+        const validateStderr = error?.stderr || '';
+        const validateMessage = error instanceof Error ? error.message : String(error);
+
+        logger.error(
+          {
+            error: validateMessage,
+            stdout: validateStdout || undefined,
+            stderr: validateStderr || undefined,
+            suitePath,
+          },
+          'Suite validation failed',
+        );
+
+        throw new Error(
+          `Suite validation failed: ${validateMessage}${validateStderr ? '\n' + validateStderr : ''}`,
+        );
+      }
+
+      // Prepare for batch processing or single evaluation
+      let results: unknown[] = [];
+      let summary: Record<string, unknown> | null = null;
+      const allResults: unknown[] = [];
+      const allSummaries: Record<string, unknown>[] = [];
+      let totalTokensUsed = 0;
+      const batchFilesToCleanup: string[] = [];
+
+      if (useBatching) {
+        // Split dataset into batches
+        const batchPaths = await this.splitDatasetIntoBatches(
+          originalDatasetPath!,
+          maxConcurrentEvals,
+          outputDir,
+        );
+        batchFilesToCleanup.push(...batchPaths);
+
+        logger.info(
+          { batchCount: batchPaths.length, batchSize: maxConcurrentEvals },
+          'Split dataset into batches for token-limited evaluation',
+        );
+
+        // Process batches sequentially
+        for (let batchIndex = 0; batchIndex < batchPaths.length; batchIndex++) {
+          const batchDatasetPath = batchPaths[batchIndex];
+          const batchOutputDir = path.join(outputDir, `batch_${batchIndex}`);
+          await fs.mkdir(batchOutputDir, { recursive: true });
+
+          // Create temporary suite.yaml for this batch
+          const batchSuitePath = await this.createBatchSuiteYaml(
+            suitePath,
+            batchDatasetPath,
+            outputDir,
+            batchIndex,
           );
+          batchFilesToCleanup.push(batchSuitePath);
+
+          const batchSuiteFile = path.basename(batchSuitePath);
+
+          logger.info(
+            {
+              batchIndex: batchIndex + 1,
+              totalBatches: batchPaths.length,
+              batchDatasetPath,
+            },
+            'Processing batch',
+          );
+
+          // Run evaluation for this batch
+          const batchCmd = `${pythonCmd} /app/python/run_with_graders.py run "${batchSuiteFile}" --output "${batchOutputDir}"`;
+
+          try {
+            // Prepare environment variables (same as below)
+            const env: Record<string, string> = {
+              ...process.env,
+              PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
+            };
+
+            // Add API keys and other env vars (same logic as below)
+            if (process.env.OPENAI_API_KEY) env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+            if (process.env.ANTHROPIC_API_KEY)
+              env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+            if (process.env.GOOGLE_API_KEY) env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+            if (process.env.OPENROUTER_API_KEY)
+              env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+            if (process.env.CHUTES_API_KEY) env.CHUTES_API_KEY = process.env.CHUTES_API_KEY;
+            if (process.env.TOGETHER_API_KEY) env.TOGETHER_API_KEY = process.env.TOGETHER_API_KEY;
+            if (process.env.TOGETHERAI_API_KEY)
+              env.TOGETHERAI_API_KEY = process.env.TOGETHERAI_API_KEY;
+            if (process.env.GITHUB_TOKEN) env.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+            if (process.env.MAX_STEPS) env.MAX_STEPS = process.env.MAX_STEPS;
+            if (process.env.LETTA_BASE_URL) {
+              env.LETTA_BASE_URL = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
+            } else if (process.env.LETTA_URL) {
+              env.LETTA_BASE_URL = process.env.LETTA_URL.trim().replace(/^["']|["']$/g, '');
+            }
+
+            // Run batch evaluation
+            let batchStdout = '';
+            let batchStderr = '';
+            let batchCommandFailed = false;
+            let batchGateFailed = false;
+
+            try {
+              const batchResult = await execAsync(batchCmd, {
+                cwd: outputDir, // Use outputDir so batch suite.yaml is found
+                env,
+                maxBuffer: 10 * 1024 * 1024,
+              });
+              batchStdout = batchResult.stdout || '';
+              batchStderr = batchResult.stderr || '';
+            } catch (error: any) {
+              // Command exited with non-zero code - check if it's just a gate failure
+              batchCommandFailed = true;
+              batchStdout = error.stdout || '';
+              batchStderr = error.stderr || '';
+
+              // Check if this is a gate failure (results may still be valid)
+              const isGateFailure =
+                batchStdout.includes('Some gates failed') ||
+                batchStdout.includes('Gate:') ||
+                batchStderr.includes('Some gates failed');
+
+              if (isGateFailure) {
+                batchGateFailed = true;
+                // Log the nicely formatted stdout so user can see results
+                if (batchStdout) {
+                  logger.info(
+                    { stdout: batchStdout },
+                    'Batch evaluation completed but gate failed - results below',
+                  );
+                }
+                if (batchStderr && !batchStderr.includes('Some gates failed')) {
+                  logger.warn(
+                    { stderr: batchStderr.substring(0, 500) },
+                    'letta-evals stderr output',
+                  );
+                }
+              } else {
+                // Real error - log it but still try to parse results if they exist
+                logger.warn(
+                  {
+                    error: error.message,
+                    stdout: batchStdout.substring(0, 500),
+                    stderr: batchStderr.substring(0, 500),
+                  },
+                  'Batch evaluation command failed - will attempt to parse results if available',
+                );
+              }
+            }
+
+            // Read batch results (even if command failed, results may still be valid)
+            const batchResultsPath = path.join(batchOutputDir, 'results.jsonl');
+            const batchSummaryPath = path.join(batchOutputDir, 'summary.json');
+
+            const batchResults: unknown[] = [];
+            let batchSummary: Record<string, unknown> | null = null;
+
+            try {
+              await fs.access(batchResultsPath);
+              const batchResultsContent = await fs.readFile(batchResultsPath, 'utf-8');
+              for (const line of batchResultsContent.split('\n')) {
+                const trimmed = line.trim();
+                if (trimmed) {
+                  batchResults.push(JSON.parse(trimmed));
+                }
+              }
+            } catch (error) {
+              logger.warn({ error, batchResultsPath }, 'Failed to read batch results.jsonl');
+            }
+
+            try {
+              await fs.access(batchSummaryPath);
+              const batchSummaryContent = await fs.readFile(batchSummaryPath, 'utf-8');
+              batchSummary = JSON.parse(batchSummaryContent);
+            } catch (error) {
+              logger.warn({ error, batchSummaryPath }, 'Failed to read batch summary.json');
+            }
+
+            // If we got no results and it wasn't just a gate failure, that's a real error
+            if (batchResults.length === 0 && !batchGateFailed && batchCommandFailed) {
+              throw new Error(
+                'Batch evaluation failed and produced no results. ' +
+                  'No summary.json or results.jsonl found. ' +
+                  `Command error: ${batchStderr.substring(0, 500)}`,
+              );
+            }
+
+            // Calculate tokens used in this batch
+            const batchTokens = this.calculateTotalTokensFromResults(batchResults);
+            const tokensBeforeBatch = totalTokensUsed;
+            totalTokensUsed += batchTokens;
+
+            logger.info(
+              {
+                batchIndex: batchIndex + 1,
+                batchTokens,
+                totalTokensUsed,
+                maxTokensPerEval,
+                batchResultsCount: batchResults.length,
+              },
+              'Batch completed',
+            );
+
+            // Check if this batch pushed us over the limit
+            if (totalTokensUsed >= maxTokensPerEval && tokensBeforeBatch < maxTokensPerEval) {
+              // This batch pushed us over the limit - need to pro-rate and zero out samples
+              const tokensRemaining = maxTokensPerEval - tokensBeforeBatch;
+              const tokensOverLimit = totalTokensUsed - maxTokensPerEval;
+
+              logger.warn(
+                {
+                  totalTokensUsed,
+                  maxTokensPerEval,
+                  tokensBeforeBatch,
+                  tokensRemaining,
+                  tokensOverLimit,
+                  batchIndex: batchIndex + 1,
+                  totalBatches: batchPaths.length,
+                },
+                'Token limit reached during batch - pro-rating and zeroing samples',
+              );
+
+              // Process batch results: pro-rate first sample that exceeded, zero out rest
+              const processedBatchResults: unknown[] = [];
+              let tokensProcessed = 0;
+
+              for (let i = 0; i < batchResults.length; i++) {
+                const result = batchResults[i];
+                if (typeof result !== 'object' || result === null) {
+                  processedBatchResults.push(result);
+                  continue;
+                }
+
+                const resultObj = result as Record<string, unknown>;
+                const resultData = resultObj.result as Record<string, unknown> | undefined;
+
+                if (!resultData) {
+                  processedBatchResults.push(result);
+                  continue;
+                }
+
+                // Calculate tokens for this sample
+                const sampleTokens = this.calculateTotalTokensFromResults([result]);
+                const tokensAfterThisSample = tokensBeforeBatch + tokensProcessed + sampleTokens;
+
+                if (tokensAfterThisSample <= maxTokensPerEval) {
+                  // This sample fits within the limit - add it fully
+                  processedBatchResults.push(result);
+                  tokensProcessed += sampleTokens;
+                } else if (tokensBeforeBatch + tokensProcessed < maxTokensPerEval) {
+                  // This sample pushed us over - pro-rate it
+                  const tokensAllowed = maxTokensPerEval - (tokensBeforeBatch + tokensProcessed);
+                  const prorationFactor = tokensAllowed / sampleTokens;
+
+                  logger.info(
+                    {
+                      sampleIndex: i + 1,
+                      sampleTokens,
+                      tokensAllowed,
+                      prorationFactor,
+                      originalScore: (resultData.grade as { score?: number })?.score,
+                    },
+                    'Pro-rating sample that exceeded token limit',
+                  );
+
+                  // Pro-rate the score
+                  // Note: Only pro-rate the rubric score, not gate scores (blacklist/agent_design)
+                  // Gates should remain pass/fail (1.0 or 0), only the final rubric score is pro-rated
+                  const grades = resultData.grades as Record<
+                    string,
+                    { score?: number; rationale?: string } | undefined
+                  >;
+                  if (grades) {
+                    for (const graderName in grades) {
+                      const grader = grades[graderName];
+                      if (grader && typeof grader.score === 'number') {
+                        // Only pro-rate rubric score, keep gate scores as-is (they're pass/fail)
+                        if (graderName === 'scout_rubric_grader') {
+                          grader.score = Math.round(grader.score * prorationFactor * 1000) / 1000;
+                          grader.rationale = `${grader.rationale || ''} [Score pro-rated to ${(prorationFactor * 100).toFixed(1)}% due to token limit: ${tokensAllowed}/${sampleTokens} tokens allowed]`;
+                        } else {
+                          // For gate scores, add note but don't pro-rate (they're pass/fail)
+                          grader.rationale = `${grader.rationale || ''} [Evaluation partially completed due to token limit: ${tokensAllowed}/${sampleTokens} tokens allowed]`;
+                        }
+                      }
+                    }
+                  }
+
+                  // Update main grade score
+                  const grade = resultData.grade as
+                    { score?: number; rationale?: string } | undefined;
+                  if (grade && typeof grade.score === 'number') {
+                    grade.score = Math.round(grade.score * prorationFactor * 1000) / 1000;
+                    grade.rationale = `${grade.rationale || ''} [Score pro-rated to ${(prorationFactor * 100).toFixed(1)}% due to token limit]`;
+                  }
+
+                  // Update weighted_score if present
+                  if (typeof resultData.weighted_score === 'number') {
+                    resultData.weighted_score =
+                      Math.round(resultData.weighted_score * prorationFactor * 1000) / 1000;
+                  }
+
+                  processedBatchResults.push(result);
+                  tokensProcessed += tokensAllowed; // Only count the allowed portion
+                } else {
+                  // This sample is after we already exceeded - zero it out
+                  const sample = resultObj.sample as { id?: string } | undefined;
+                  const sampleId = sample?.id || `sample_${i}`;
+
+                  logger.info(
+                    { sampleIndex: i + 1, sampleId },
+                    'Zeroing out sample that exceeded token limit',
+                  );
+
+                  const zeroResult = this.createZeroScoreResult(
+                    sampleId,
+                    'Evaluation cancelled due to token limit exceeded',
+                  );
+                  processedBatchResults.push(zeroResult);
+                  // Don't add tokens for zeroed samples
+                }
+              }
+
+              // Add processed batch results
+              allResults.push(...processedBatchResults);
+              if (batchSummary) {
+                allSummaries.push(batchSummary);
+              }
+
+              // Stop processing more batches
+              break;
+            } else {
+              // Batch fits within limit or we were already over - add results normally
+              allResults.push(...batchResults);
+              if (batchSummary) {
+                allSummaries.push(batchSummary);
+              }
+
+              // Check if we've hit the token limit (shouldn't happen here, but check anyway)
+              if (totalTokensUsed >= maxTokensPerEval) {
+                logger.warn(
+                  {
+                    totalTokensUsed,
+                    maxTokensPerEval,
+                    batchIndex: batchIndex + 1,
+                    totalBatches: batchPaths.length,
+                  },
+                  'Token limit reached - stopping batch processing',
+                );
+                break; // Stop processing more batches
+              }
+            }
+          } catch (error: any) {
+            logger.error(
+              {
+                batchIndex: batchIndex + 1,
+                error: error instanceof Error ? error.message : String(error),
+                stdout: error?.stdout?.substring(0, 500),
+                stderr: error?.stderr?.substring(0, 500),
+              },
+              'Batch evaluation failed',
+            );
+            // Continue to next batch or stop if critical
+            throw error;
+          }
+        }
+
+        // Pad remaining samples with zero scores
+        const evaluatedSamples = allResults.length;
+        const remainingSamples = totalSamples - evaluatedSamples;
+
+        if (remainingSamples > 0) {
+          logger.info(
+            { evaluatedSamples, remainingSamples, totalSamples },
+            'Padding remaining samples with zero scores',
+          );
+
+          // Read original dataset to get sample IDs for padding
+          const originalDatasetContent = await fs.readFile(originalDatasetPath!, 'utf-8');
+          const datasetLines = originalDatasetContent.split('\n').filter((line) => line.trim());
+
+          // Get IDs of evaluated samples
+          const evaluatedSampleIds = new Set<string>();
+          for (const result of allResults) {
+            if (typeof result === 'object' && result !== null) {
+              const resultObj = result as Record<string, unknown>;
+              const sample = resultObj.sample as { id?: string } | undefined;
+              if (sample?.id) {
+                evaluatedSampleIds.add(sample.id);
+              }
+            }
+          }
+
+          // Create zero-score results for remaining samples
+          for (let i = 0; i < datasetLines.length; i++) {
+            try {
+              const sample = JSON.parse(datasetLines[i]);
+              if (sample.id && !evaluatedSampleIds.has(sample.id)) {
+                const zeroResult = this.createZeroScoreResult(
+                  sample.id,
+                  'Evaluation skipped due to token limit exceeded',
+                );
+                allResults.push(zeroResult);
+
+                // Stop if we've padded all remaining samples
+                if (allResults.length >= totalSamples) {
+                  break;
+                }
+              }
+            } catch (e) {
+              // Skip invalid JSON lines
+            }
+          }
+        }
+
+        // Log summary of token limit processing for testing
+        if (useBatching) {
+          const scoreSummary = allResults.map((result: unknown, index: number) => {
+            if (typeof result !== 'object' || result === null) {
+              return {
+                sample: index + 1,
+                score: null,
+                tokens: 0,
+                status: 'invalid',
+              };
+            }
+
+            const resultObj = result as Record<string, unknown>;
+            const resultData = resultObj.result as Record<string, unknown> | undefined;
+            const sample = resultObj.sample as { id?: string } | undefined;
+
+            if (!resultData) {
+              return {
+                sample: index + 1,
+                id: sample?.id,
+                score: null,
+                tokens: 0,
+                status: 'no_result_data',
+              };
+            }
+
+            const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
+            const grades = resultData.grades as
+              Record<string, { score?: number; rationale?: string }> | undefined;
+            const performance = resultData.performance as { total_tokens?: number } | undefined;
+
+            const score = grade?.score ?? resultData.weighted_score ?? 0;
+            const tokens = performance?.total_tokens ?? 0;
+
+            // Check if pro-rated
+            const isProrated =
+              grade?.rationale?.includes('pro-rated') ||
+              Object.values(grades || {}).some((g) => g?.rationale?.includes('pro-rated'));
+            const isZeroed =
+              grade?.rationale?.includes('cancelled') || grade?.rationale?.includes('skipped');
+
+            return {
+              sample: index + 1,
+              id: sample?.id,
+              score: typeof score === 'number' ? Math.round(score * 1000) / 1000 : null,
+              tokens,
+              status: isProrated ? 'prorated' : isZeroed ? 'zeroed' : 'full',
+              blacklist: grades?.blacklist?.score,
+              agent_design: grades?.agent_design?.score,
+              scout_rubric: grades?.scout_rubric_grader?.score,
+            };
+          });
+
+          const validScores = scoreSummary.filter((s) => s.score !== null && s.status !== 'zeroed');
+          const averageScore =
+            validScores.length > 0
+              ? validScores.reduce((sum, s) => sum + (s.score || 0), 0) / validScores.length
+              : 0;
+
+          logger.info(
+            {
+              totalTokensUsed,
+              maxTokensPerEval,
+              totalSamples,
+              evaluatedSamples: allResults.length,
+              tokensPerTestCase: tokensPerTestCase ?? undefined,
+              calculatedMaxTokens: calculatedMaxTokens ?? undefined,
+              absoluteMaxCap: ABSOLUTE_MAX_TOKENS,
+              usingOverrideMode,
+              scoreSummary,
+              averageScore: Math.round(averageScore * 1000) / 1000,
+              breakdown: {
+                full: scoreSummary.filter((s) => s.status === 'full').length,
+                prorated: scoreSummary.filter((s) => s.status === 'prorated').length,
+                zeroed: scoreSummary.filter((s) => s.status === 'zeroed').length,
+              },
+            },
+            'Token limit processing summary',
+          );
+        }
+
+        // Clean up temporary batch files
+        for (const filePath of batchFilesToCleanup) {
+          try {
+            await fs.unlink(filePath);
+          } catch (error) {
+            logger.debug({ error, filePath }, 'Failed to cleanup batch file (non-fatal)');
+          }
+        }
+
+        // Now process the combined results (will continue below with existing processing logic)
+        // Set results and summary for processing
+        results = allResults;
+
+        // Recalculate summary from combined results
+        if (allSummaries.length > 0 || results.length > 0) {
+          // We'll recalculate summary metrics below
+          summary = allSummaries[0] || {}; // Use first batch summary as template
         }
       }
 
-      // Log stdout for debugging (letta-evals may output progress info here)
-      // if (stdout) {
-      //   logger.info({ stdout }, 'letta-evals stdout output');
-      // }
+      // Now run the evaluation using wrapper script (only if not using batching)
+      const stdout = '';
+      const stderr = '';
+      const commandFailed = false;
+      const gateFailed = false;
 
-      if (stderr) {
-        // Only log stderr as warning if it's not just a gate failure
-        if (!gateFailed) {
-          logger.warn({ stderr }, 'letta-evals stderr output');
-        }
-        
-        // Check for common error patterns in stderr
-        if (stderr.includes('401') || stderr.includes('Unauthorized')) {
-          logger.error(
-            {
-              error: '401 Unauthorized',
-              baseUrl: process.env.LETTA_BASE_URL || '(not set)',
-              hasLettaBaseUrl: !!process.env.LETTA_BASE_URL,
-              stderr: stderr.substring(0, 500), // First 500 chars
-            },
-            'Detected 401 Unauthorized error - check Letta server authentication'
-          );
-        }
-        if (stderr.includes('403') || stderr.includes('Forbidden')) {
-          logger.error(
-            {
-              error: '403 Forbidden',
-              baseUrl: process.env.LETTA_BASE_URL || '(not set)',
-              hasLettaBaseUrl: !!process.env.LETTA_BASE_URL,
-              stderr: stderr.substring(0, 500), // First 500 chars
-            },
-            'Detected 403 Forbidden error - check Letta server permissions/authentication'
-          );
+      if (!useBatching) {
+        const cmd = `${pythonCmd} /app/python/run_with_graders.py run "${suiteFile}" --output "${outputDir}"`;
+        logger.info({ cmd, cwd: suiteDir, outputDir }, 'Running letta-evals');
+
+        try {
+          // Prepare environment variables for letta-evals
+          // Pass through all model provider API keys
+          const env: Record<string, string> = {
+            ...process.env,
+            // Ensure Python path is available
+            PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
+          };
+
+          // Add model provider API keys (only if defined)
+          if (process.env.OPENAI_API_KEY) {
+            env.OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+          }
+          if (process.env.ANTHROPIC_API_KEY) {
+            env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+          }
+          if (process.env.GOOGLE_API_KEY) {
+            env.GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+          }
+          if (process.env.OPENROUTER_API_KEY) {
+            env.OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+          }
+          if (process.env.CHUTES_API_KEY) {
+            env.CHUTES_API_KEY = process.env.CHUTES_API_KEY;
+          }
+          if (process.env.TOGETHER_API_KEY) {
+            env.TOGETHER_API_KEY = process.env.TOGETHER_API_KEY;
+          }
+          if (process.env.TOGETHERAI_API_KEY) {
+            env.TOGETHERAI_API_KEY = process.env.TOGETHERAI_API_KEY;
+          }
+          // GitHub token for authenticated API requests (higher rate limits)
+          if (process.env.GITHUB_TOKEN) {
+            env.GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+          }
+          // Max steps for agent tool calls (limits number of steps per evaluation)
+          if (process.env.MAX_STEPS) {
+            env.MAX_STEPS = process.env.MAX_STEPS;
+          }
+          // Max tokens per evaluation (limits total tokens used across all test cases)
+          if (process.env.MAX_TOKENS_PER_EVAL) {
+            env.MAX_TOKENS_PER_EVAL = process.env.MAX_TOKENS_PER_EVAL;
+          }
+          // Max concurrent evaluations (default: 10, max: 20)
+          if (process.env.MAX_CONCURRENT_EVALS) {
+            env.MAX_CONCURRENT_EVALS = process.env.MAX_CONCURRENT_EVALS;
+          }
+          // Letta - only support hosted instances
+          if (process.env.LETTA_BASE_URL) {
+            // Strip quotes if present (common when set in docker-compose or shell scripts)
+            env.LETTA_BASE_URL = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
+          } else if (process.env.LETTA_URL) {
+            // Strip quotes if present
+            env.LETTA_BASE_URL = process.env.LETTA_URL.trim().replace(/^["']|["']$/g, '');
+          }
+
+          // Log the exact command and environment for debugging
+          console.log('\n' + '='.repeat(80));
+          console.log('LETTA-EVALS COMMAND:');
+          console.log('='.repeat(80));
+          console.log(`Command: ${cmd}`);
+          console.log(`Working Directory: ${suiteDir}`);
+          console.log(`Output Directory: ${outputDir}`);
+          console.log(`Suite File: ${suiteFile}`);
+          console.log('\nEnvironment Variables (keys only, values hidden for security):');
+          const envKeys = Object.keys(env).sort();
+          for (const key of envKeys) {
+            const value = env[key];
+            // Show if set (but not the actual value for API keys)
+            if (
+              key.includes('API_KEY') ||
+              key.includes('SECRET') ||
+              key.includes('PASSWORD') ||
+              key.includes('TOKEN')
+            ) {
+              console.log(`  ${key}=***SET*** (${value ? value.length : 0} chars)`);
+            } else if (key === 'PATH') {
+              console.log(`  ${key}=${value}`);
+            } else {
+              // For other vars, show first 50 chars if not sensitive
+              const preview = value && value.length > 50 ? value.substring(0, 50) + '...' : value;
+              console.log(`  ${key}=${preview}`);
+            }
+          }
+          console.log('='.repeat(80) + '\n');
+
+          let stdout = '';
+          let stderr = '';
+          let commandFailed = false;
+          let gateFailed = false;
+
+          try {
+            const result = await execAsync(cmd, {
+              cwd: suiteDir,
+              env,
+              maxBuffer: 10 * 1024 * 1024, // 10MB buffer for large outputs
+            });
+            stdout = result.stdout || '';
+            stderr = result.stderr || '';
+          } catch (error: any) {
+            // Command exited with non-zero code - check if it's just a gate failure
+            commandFailed = true;
+            stdout = error.stdout || '';
+            stderr = error.stderr || '';
+
+            // Check if this is a gate failure (results may still be valid)
+            const isGateFailure =
+              stdout.includes('Some gates failed') ||
+              stdout.includes('Gate:') ||
+              stderr.includes('Some gates failed');
+
+            if (isGateFailure) {
+              gateFailed = true;
+              // Log the nicely formatted stdout so user can see results
+              if (stdout) {
+                logger.info({ stdout }, 'Evaluation completed but gate failed - results below');
+              }
+              if (stderr && !stderr.includes('Some gates failed')) {
+                logger.warn({ stderr: stderr.substring(0, 500) }, 'letta-evals stderr output');
+              }
+            } else {
+              // Real error - log it but still try to parse results if they exist
+              logger.warn(
+                {
+                  error: error.message,
+                  stdout: stdout.substring(0, 500),
+                  stderr: stderr.substring(0, 500),
+                },
+                'Evaluation command failed - will attempt to parse results if available',
+              );
+            }
+          }
+
+          // Log stdout for debugging (letta-evals may output progress info here)
+          // if (stdout) {
+          //   logger.info({ stdout }, 'letta-evals stdout output');
+          // }
+
+          if (stderr) {
+            // Only log stderr as warning if it's not just a gate failure
+            if (!gateFailed) {
+              logger.warn({ stderr }, 'letta-evals stderr output');
+            }
+
+            // Check for common error patterns in stderr
+            if (stderr.includes('401') || stderr.includes('Unauthorized')) {
+              logger.error(
+                {
+                  error: '401 Unauthorized',
+                  baseUrl: process.env.LETTA_BASE_URL || '(not set)',
+                  hasLettaBaseUrl: !!process.env.LETTA_BASE_URL,
+                  stderr: stderr.substring(0, 500), // First 500 chars
+                },
+                'Detected 401 Unauthorized error - check Letta server authentication',
+              );
+            }
+            if (stderr.includes('403') || stderr.includes('Forbidden')) {
+              logger.error(
+                {
+                  error: '403 Forbidden',
+                  baseUrl: process.env.LETTA_BASE_URL || '(not set)',
+                  hasLettaBaseUrl: !!process.env.LETTA_BASE_URL,
+                  stderr: stderr.substring(0, 500), // First 500 chars
+                },
+                'Detected 403 Forbidden error - check Letta server permissions/authentication',
+              );
+            }
+          }
+        } catch (error: any) {
+          // If single evaluation fails, rethrow
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          logger.error({ error: errorMessage }, 'Single evaluation failed');
+          throw error;
         }
       }
-    } catch (error: any) {
-      // If single evaluation fails, rethrow
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      logger.error({ error: errorMessage }, 'Single evaluation failed');
-      throw error;
-    }
-    }
 
-    const duration = (Date.now() - startTime) / 1000;
+      const duration = (Date.now() - startTime) / 1000;
 
       // Clean up agents created during evaluation
       if (this.lettaClient && agentsBeforeEvaluation.size >= 0) {
         try {
           const agentsAfter = await this.lettaClient.listAgents();
-          const agentsAfterSet = new Set(agentsAfter.map(a => a.id));
-          
+          const agentsAfterSet = new Set(agentsAfter.map((a) => a.id));
+
           // Find agents that were created during evaluation
           const agentsToDelete = Array.from(agentsAfterSet).filter(
-            agentId => !agentsBeforeEvaluation.has(agentId)
+            (agentId) => !agentsBeforeEvaluation.has(agentId),
           );
 
           if (agentsToDelete.length > 0) {
             logger.debug(
               { agentCount: agentsToDelete.length, agentIds: agentsToDelete },
-              'Cleaning up agents created during evaluation'
+              'Cleaning up agents created during evaluation',
             );
 
             let deletedCount = 0;
@@ -3164,30 +3427,30 @@ export class TaskProcessor {
               } catch (error) {
                 failedCount++;
                 logger.warn(
-                  { 
+                  {
                     error: error instanceof Error ? error.message : String(error),
-                    agentId 
+                    agentId,
                   },
-                  'Failed to delete agent created during evaluation (non-fatal)'
+                  'Failed to delete agent created during evaluation (non-fatal)',
                 );
               }
             }
 
             logger.debug(
-              { 
+              {
                 totalCreated: agentsToDelete.length,
                 deleted: deletedCount,
-                failed: failedCount
+                failed: failedCount,
               },
-              'Completed cleanup of agents created during evaluation'
+              'Completed cleanup of agents created during evaluation',
             );
           } else {
             logger.debug('No new agents created during evaluation');
           }
         } catch (error) {
-            logger.warn(
+          logger.warn(
             { error: error instanceof Error ? error.message : String(error) },
-            'Failed to clean up agents created during evaluation (non-fatal)'
+            'Failed to clean up agents created during evaluation (non-fatal)',
           );
         }
       }
@@ -3196,30 +3459,30 @@ export class TaskProcessor {
       if (this.lettaClient && foldersBeforeEvaluation.size >= 0) {
         try {
           const foldersAfter = await this.lettaClient.listFolders();
-          const foldersAfterSet = new Set(foldersAfter.map(f => f.id));
-          
+          const foldersAfterSet = new Set(foldersAfter.map((f) => f.id));
+
           // Find folders that were created during evaluation
-          const foldersToDelete = foldersAfter.filter(
-            folder => {
-              // Only delete folders that:
-              // 1. Were created during evaluation (not in before set)
-              // 2. Are company_policy_data_* folders (with hash suffixes)
-              // 3. Or exact match company_policy_data folder (if it was created during evaluation)
-              const wasCreatedDuringEvaluation = !foldersBeforeEvaluation.has(folder.id);
-              const isCompanyPolicyData = folder.name === 'company_policy_data' || folder.name.startsWith('company_policy_data_');
-              
-              return wasCreatedDuringEvaluation && isCompanyPolicyData;
-            }
-          );
+          const foldersToDelete = foldersAfter.filter((folder) => {
+            // Only delete folders that:
+            // 1. Were created during evaluation (not in before set)
+            // 2. Are company_policy_data_* folders (with hash suffixes)
+            // 3. Or exact match company_policy_data folder (if it was created during evaluation)
+            const wasCreatedDuringEvaluation = !foldersBeforeEvaluation.has(folder.id);
+            const isCompanyPolicyData =
+              folder.name === 'company_policy_data' ||
+              folder.name.startsWith('company_policy_data_');
+
+            return wasCreatedDuringEvaluation && isCompanyPolicyData;
+          });
 
           if (foldersToDelete.length > 0) {
             logger.debug(
-              { 
-                folderCount: foldersToDelete.length, 
-                folderNames: foldersToDelete.map(f => f.name),
-                folderIds: foldersToDelete.map(f => f.id)
+              {
+                folderCount: foldersToDelete.length,
+                folderNames: foldersToDelete.map((f) => f.name),
+                folderIds: foldersToDelete.map((f) => f.id),
               },
-              'Cleaning up folders created during evaluation'
+              'Cleaning up folders created during evaluation',
             );
 
             let deletedCount = 0;
@@ -3231,23 +3494,23 @@ export class TaskProcessor {
               } catch (error) {
                 failedCount++;
                 logger.warn(
-                  { 
+                  {
                     error: error instanceof Error ? error.message : String(error),
                     folderId: folder.id,
-                    folderName: folder.name
+                    folderName: folder.name,
                   },
-                  'Failed to delete folder created during evaluation (non-fatal)'
+                  'Failed to delete folder created during evaluation (non-fatal)',
                 );
               }
             }
 
             logger.debug(
-              { 
+              {
                 totalCreated: foldersToDelete.length,
                 deleted: deletedCount,
-                failed: failedCount
+                failed: failedCount,
               },
-              'Completed cleanup of folders created during evaluation'
+              'Completed cleanup of folders created during evaluation',
             );
           } else {
             logger.debug('No new company_policy_data folders created during evaluation');
@@ -3255,7 +3518,7 @@ export class TaskProcessor {
         } catch (error) {
           logger.warn(
             { error: error instanceof Error ? error.message : String(error) },
-            'Failed to clean up folders created during evaluation (non-fatal)'
+            'Failed to clean up folders created during evaluation (non-fatal)',
           );
         }
       }
@@ -3263,30 +3526,30 @@ export class TaskProcessor {
       // Load results - validate that evaluation actually produced output
       // Only load from files if not using batching (batching already has results)
       if (!useBatching) {
-      const summaryPath = path.join(outputDir, 'summary.json');
-      const resultsPath = path.join(outputDir, 'results.jsonl');
+        const summaryPath = path.join(outputDir, 'summary.json');
+        const resultsPath = path.join(outputDir, 'results.jsonl');
 
-      // Check if summary.json exists
-      try {
-        await fs.access(summaryPath);
-        const summaryContent = await fs.readFile(summaryPath, 'utf-8');
-        summary = JSON.parse(summaryContent);
-      } catch (error) {
-        logger.warn({ error, summaryPath }, 'Failed to read summary.json');
-      }
-
-      // Check if results.jsonl exists
-      try {
-        await fs.access(resultsPath);
-        const resultsContent = await fs.readFile(resultsPath, 'utf-8');
-        for (const line of resultsContent.split('\n')) {
-          const trimmed = line.trim();
-          if (trimmed) {
-            results.push(JSON.parse(trimmed));
-          }
+        // Check if summary.json exists
+        try {
+          await fs.access(summaryPath);
+          const summaryContent = await fs.readFile(summaryPath, 'utf-8');
+          summary = JSON.parse(summaryContent);
+        } catch (error) {
+          logger.warn({ error, summaryPath }, 'Failed to read summary.json');
         }
-      } catch (error) {
-        logger.warn({ error, resultsPath }, 'Failed to read results.jsonl');
+
+        // Check if results.jsonl exists
+        try {
+          await fs.access(resultsPath);
+          const resultsContent = await fs.readFile(resultsPath, 'utf-8');
+          for (const line of resultsContent.split('\n')) {
+            const trimmed = line.trim();
+            if (trimmed) {
+              results.push(JSON.parse(trimmed));
+            }
+          }
+        } catch (error) {
+          logger.warn({ error, resultsPath }, 'Failed to read results.jsonl');
         }
       }
 
@@ -3297,15 +3560,15 @@ export class TaskProcessor {
         if (commandFailed && !gateFailed) {
           throw new Error(
             'Evaluation failed and produced no results. ' +
-            'No summary.json or results.jsonl found. ' +
-            `Command error: ${stderr.substring(0, 500)}`
+              'No summary.json or results.jsonl found. ' +
+              `Command error: ${stderr.substring(0, 500)}`,
           );
         }
         // If gate failed but no results, still an error
         throw new Error(
           'Evaluation completed but produced no results. ' +
-          'No summary.json or results.jsonl found. ' +
-          'This may indicate letta-evals failed silently.'
+            'No summary.json or results.jsonl found. ' +
+            'This may indicate letta-evals failed silently.',
         );
       }
 
@@ -3315,9 +3578,9 @@ export class TaskProcessor {
           {
             gateFailed: true,
             resultsCount: results.length,
-            summaryExists: !!summary
+            summaryExists: !!summary,
           },
-          'Gate failed but results are available - returning results with gate failure noted'
+          'Gate failed but results are available - returning results with gate failure noted',
         );
       }
 
@@ -3328,17 +3591,18 @@ export class TaskProcessor {
           if (typeof result !== 'object' || result === null) return false;
           const resultObj = result as Record<string, unknown>;
           const resultData = resultObj.result as Record<string, unknown> | undefined;
-          
+
           if (!resultData) return false;
-          
+
           const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
           const submission = resultData.submission as string | undefined;
-          
+
           // Check if sample failed: score is 0, submission is empty, or rationale contains "Error:"
           return (
             grade?.score === 0 &&
             (!submission || submission.trim() === '') &&
-            (grade?.rationale?.includes('Error:') || grade?.rationale?.toLowerCase().includes('error'))
+            (grade?.rationale?.includes('Error:') ||
+              grade?.rationale?.toLowerCase().includes('error'))
           );
         });
 
@@ -3347,15 +3611,15 @@ export class TaskProcessor {
           const firstResult = results[0];
           let firstError = 'Unknown error';
           let errorDetails: Record<string, unknown> = {};
-          
+
           if (typeof firstResult === 'object' && firstResult !== null) {
             const resultObj = firstResult as Record<string, unknown>;
             const resultData = resultObj.result as Record<string, unknown> | undefined;
             const grade = resultData?.grade as { rationale?: string; score?: number } | undefined;
             const submission = resultData?.submission as string | undefined;
-            
+
             firstError = grade?.rationale || 'Unknown error';
-            
+
             // Extract detailed error info for debugging
             errorDetails = {
               score: grade?.score,
@@ -3363,11 +3627,17 @@ export class TaskProcessor {
               submissionLength: submission?.length || 0,
               rationale: grade?.rationale?.substring(0, 300) || '(none)',
               hasErrorInRationale: grade?.rationale?.includes('Error:') || false,
-              has403Error: grade?.rationale?.includes('403') || grade?.rationale?.includes('Forbidden') || false,
-              has401Error: grade?.rationale?.includes('401') || grade?.rationale?.includes('Unauthorized') || false,
+              has403Error:
+                grade?.rationale?.includes('403') ||
+                grade?.rationale?.includes('Forbidden') ||
+                false,
+              has401Error:
+                grade?.rationale?.includes('401') ||
+                grade?.rationale?.includes('Unauthorized') ||
+                false,
             };
           }
-          
+
           // Log detailed error information for debugging
           logger.error(
             {
@@ -3378,23 +3648,23 @@ export class TaskProcessor {
                 LETTA_BASE_URL: process.env.LETTA_BASE_URL || '(not set)',
               },
             },
-            'All evaluation samples failed - detailed error information'
+            'All evaluation samples failed - detailed error information',
           );
-          
-          const errorMessage = firstError.length > 500 
-            ? firstError.substring(0, 500) + '...' 
-            : firstError;
-          
+
+          const errorMessage =
+            firstError.length > 500 ? firstError.substring(0, 500) + '...' : firstError;
+
           throw new Error(
             `All evaluation samples failed. ` +
-            `This indicates the evaluation did not succeed despite letta-evals exiting with code 0. ` +
-            `First error: ${errorMessage}`
+              `This indicates the evaluation did not succeed despite letta-evals exiting with code 0. ` +
+              `First error: ${errorMessage}`,
           );
         }
 
         // Check summary metrics - if all scores are 0 and no attempts succeeded
         if (summary && typeof summary === 'object' && 'metrics' in summary) {
-          const metrics = (summary as Record<string, unknown>).metrics as Record<string, unknown> | undefined;
+          const metrics = (summary as Record<string, unknown>).metrics as
+            Record<string, unknown> | undefined;
           if (
             metrics?.avg_score_total === 0 &&
             metrics?.passed_attempts === 0 &&
@@ -3403,8 +3673,8 @@ export class TaskProcessor {
           ) {
             throw new Error(
               'Evaluation completed but all samples failed. ' +
-              'No successful attempts recorded. ' +
-              'This may indicate configuration or connectivity issues.'
+                'No successful attempts recorded. ' +
+                'This may indicate configuration or connectivity issues.',
             );
           }
         }
@@ -3419,7 +3689,10 @@ export class TaskProcessor {
         const suiteConfig = yaml.load(suiteYamlContent) as any;
         if (suiteConfig?.graders && typeof suiteConfig.graders === 'object') {
           for (const [graderName, graderConfig] of Object.entries(suiteConfig.graders)) {
-            const grader = graderConfig as { weight?: number; [key: string]: unknown };
+            const grader = graderConfig as {
+              weight?: number;
+              [key: string]: unknown;
+            };
             if (typeof grader.weight === 'number') {
               graderWeights[graderName] = grader.weight;
             }
@@ -3432,20 +3705,21 @@ export class TaskProcessor {
       // Process results: round scores and add performance metrics
       const processedResults = results.map((result: unknown) => {
         if (typeof result !== 'object' || result === null) return result;
-        
+
         const resultObj = result as Record<string, unknown>;
         const resultData = resultObj.result as Record<string, unknown> | undefined;
-        
+
         if (!resultData) return result;
-        
+
         // Round scores to 3 decimal places
         const roundScore = (score: number | undefined): number | undefined => {
           if (score === undefined || score === null) return score;
           return Math.round(score * 1000) / 1000;
         };
-        
+
         // Process grades object (e.g., grades.quality.score)
-        const grades = resultData.grades as Record<string, { score?: number; [key: string]: unknown }> | undefined;
+        const grades = resultData.grades as
+          Record<string, { score?: number; [key: string]: unknown }> | undefined;
         if (grades) {
           for (const graderName in grades) {
             const grader = grades[graderName];
@@ -3454,48 +3728,51 @@ export class TaskProcessor {
             }
           }
         }
-        
+
         // Calculate performance metrics
-        const agentUsage = resultData.agent_usage as Array<{
-          total_tokens?: number;
-          step_count?: number;
-          [key: string]: unknown;
-        }> | undefined;
-        
+        const agentUsage = resultData.agent_usage as
+          | Array<{
+              total_tokens?: number;
+              step_count?: number;
+              [key: string]: unknown;
+            }>
+          | undefined;
+
         let totalTokens = 0;
         let avgSteps = 0;
-        
+
         // Sum agent tokens
         if (agentUsage && Array.isArray(agentUsage) && agentUsage.length > 0) {
           const agentTokens = agentUsage.reduce((sum, usage) => {
             return sum + (usage.total_tokens || 0);
           }, 0);
           totalTokens += agentTokens;
-          
+
           // Calculate average steps
-          const steps = agentUsage.map(u => u.step_count || 0).filter(s => s > 0);
+          const steps = agentUsage.map((u) => u.step_count || 0).filter((s) => s > 0);
           if (steps.length > 0) {
             avgSteps = steps.reduce((sum, s) => sum + s, 0) / steps.length;
           }
         }
-        
+
         // Add grading tokens from all graders
         let gradingTokens = 0;
         const graderNames = grades ? Object.keys(grades) : [];
-        
+
         if (graderNames.length > 0) {
           // Count tokens from all graders
           for (const graderName of graderNames) {
             const grader = grades![graderName];
-            const graderMetadata = grader?.metadata as { usage?: { total_tokens?: number } } | undefined;
+            const graderMetadata = grader?.metadata as
+              { usage?: { total_tokens?: number } } | undefined;
             if (graderMetadata?.usage?.total_tokens) {
               gradingTokens += graderMetadata.usage.total_tokens;
             }
           }
         }
-        
+
         totalTokens += gradingTokens;
-        
+
         // Calculate score: weighted average of non-gate graders if both gates pass, otherwise 0
         let finalScore: number | undefined = undefined;
         if (grades && Object.keys(grades).length > 0) {
@@ -3525,14 +3802,19 @@ export class TaskProcessor {
             rubricScore = grades.scout_rubric_grader?.score;
           }
 
-          if (blacklistPassed && agentDesignPassed && rubricScore !== undefined && rubricScore !== null) {
+          if (
+            blacklistPassed &&
+            agentDesignPassed &&
+            rubricScore !== undefined &&
+            rubricScore !== null
+          ) {
             finalScore = roundScore(rubricScore);
           } else {
             // Either gate failed, score is 0
             finalScore = 0;
           }
         }
-        
+
         // Use final score for token calculation
         // Note: score is 0–1, where 1 = 100%. We want "tokens per 1%" so we divide by 100.
         // Example: if score = 0.8 and totalTokens = 8000,
@@ -3540,12 +3822,12 @@ export class TaskProcessor {
         //   tokens per 1% score   = 10000 / 100 = 100
         const score = finalScore ?? 0;
         const tokenPerScorePercent = score > 0 ? totalTokens / (score * 100) : undefined;
-        
+
         // Store final score in result data for display
         if (finalScore !== undefined) {
           resultData.weighted_score = finalScore;
         }
-        
+
         // Update rationale based on gate status
         // If gates passed: only use rubric rationale
         // If gates failed: combine blacklist and agent_design rationales with rubric
@@ -3555,7 +3837,7 @@ export class TaskProcessor {
           const blacklistPassed = blacklistScore === 1.0 || blacklistScore === undefined;
           const agentDesignPassed = agentDesignScore === 1.0 || agentDesignScore === undefined;
           const gatesPassed = blacklistPassed && agentDesignPassed;
-          
+
           // Collect rationale from all non-gate graders (weight > 0), or fall back to scout_rubric_grader
           let rubricRationale: string | undefined = undefined;
           const nonGateRationales: string[] = [];
@@ -3563,7 +3845,12 @@ export class TaskProcessor {
             const w = graderWeights[name] ?? 0;
             if (w > 0) {
               const r = (grade as any).rationale as string | undefined;
-              if (r) nonGateRationales.push(nonGateRationales.length > 0 || Object.keys(graderWeights).length > 1 ? `${name}: ${r}` : r);
+              if (r)
+                nonGateRationales.push(
+                  nonGateRationales.length > 0 || Object.keys(graderWeights).length > 1
+                    ? `${name}: ${r}`
+                    : r,
+                );
             }
           }
           if (nonGateRationales.length > 0) {
@@ -3582,7 +3869,7 @@ export class TaskProcessor {
           } else {
             // Gates failed: combine all relevant rationales
             const rationales: string[] = [];
-            
+
             if (blacklistRationale) {
               rationales.push(`Blacklist: ${blacklistRationale}`);
             }
@@ -3592,82 +3879,87 @@ export class TaskProcessor {
             if (rubricRationale) {
               rationales.push(`Rubric: ${rubricRationale}`);
             }
-            
+
             combinedRationale = rationales.length > 0 ? rationales.join(' | ') : rubricRationale;
           }
-          
+
           // Update the grade rationale if we have a combined one
           if (combinedRationale && resultData.grade && typeof resultData.grade === 'object') {
             (resultData.grade as { rationale?: string }).rationale = combinedRationale;
           }
         }
-        
+
         // Add performance key
         resultData.performance = {
           total_tokens: totalTokens,
           av_tokens: totalTokens, // Average tokens per sample (this is the total for this sample)
           // Tokens per 1 percentage point of score (2 decimal places stored)
-          token_per_score_point: tokenPerScorePercent !== undefined
-            ? Math.round(tokenPerScorePercent * 100) / 100
-            : undefined,
-          av_steps: roundScore(avgSteps) || 0
+          token_per_score_point:
+            tokenPerScorePercent !== undefined
+              ? Math.round(tokenPerScorePercent * 100) / 100
+              : undefined,
+          av_steps: roundScore(avgSteps) || 0,
         };
-        
+
         return result;
       });
-      
+
       // Process summary: round scores to 3 decimal places
       let processedSummary = summary;
       if (summary && typeof summary === 'object') {
         processedSummary = { ...summary };
-        
+
         const roundScore = (score: number | undefined): number | undefined => {
           if (score === undefined || score === null) return score;
           return Math.round(score * 1000) / 1000;
         };
-        
+
         // Process metrics
         if ('metrics' in processedSummary) {
           const metrics = (processedSummary.metrics as Record<string, unknown>) || {};
           const processedMetrics = { ...metrics };
-          
+
           // Round avg_score_total
           // Note: avg_score_total from letta-evals should be calculated using grader weights from suite.yaml
           if (typeof processedMetrics.avg_score_total === 'number') {
             processedMetrics.avg_score_total = roundScore(processedMetrics.avg_score_total)!;
           }
-          
+
           // Round avg_score_attempted
           // Note: avg_score_attempted from letta-evals should be calculated using grader weights from suite.yaml
           if (typeof processedMetrics.avg_score_attempted === 'number') {
-            processedMetrics.avg_score_attempted = roundScore(processedMetrics.avg_score_attempted)!;
+            processedMetrics.avg_score_attempted = roundScore(
+              processedMetrics.avg_score_attempted,
+            )!;
           }
-          
+
           // Process by_metric
           if (processedMetrics.by_metric && typeof processedMetrics.by_metric === 'object') {
             const byMetric = processedMetrics.by_metric as Record<string, unknown>;
             const processedByMetric: Record<string, unknown> = {};
-            
+
             for (const metricName in byMetric) {
               const metricData = byMetric[metricName] as Record<string, unknown>;
               if (metricData && typeof metricData === 'object') {
                 processedByMetric[metricName] = {
                   ...metricData,
-                  avg_score_total: typeof metricData.avg_score_total === 'number' 
-                    ? roundScore(metricData.avg_score_total)! 
-                    : metricData.avg_score_total,
-                  avg_score_attempted: typeof metricData.avg_score_attempted === 'number'
-                    ? roundScore(metricData.avg_score_attempted)!
-                    : metricData.avg_score_attempted
+                  avg_score_total:
+                    typeof metricData.avg_score_total === 'number'
+                      ? roundScore(metricData.avg_score_total)!
+                      : metricData.avg_score_total,
+                  avg_score_attempted:
+                    typeof metricData.avg_score_attempted === 'number'
+                      ? roundScore(metricData.avg_score_attempted)!
+                      : metricData.avg_score_attempted,
                 };
               } else {
                 processedByMetric[metricName] = metricData;
               }
             }
-            
+
             processedMetrics.by_metric = processedByMetric;
           }
-          
+
           processedSummary.metrics = processedMetrics;
         }
       }
@@ -3701,10 +3993,7 @@ export class TaskProcessor {
         logger.warn(
           {
             rawOutputPath,
-            error:
-              writeError instanceof Error
-                ? writeError.message
-                : String(writeError),
+            error: writeError instanceof Error ? writeError.message : String(writeError),
           },
           'Failed to save raw evaluation output to file',
         );
@@ -3719,22 +4008,22 @@ export class TaskProcessor {
     } catch (error: any) {
       // Clean up MCP servers even on error
       await this.cleanupMcpServers(suiteDir);
-      
+
       // execAsync errors have stdout and stderr properties
       const stdout = error?.stdout || '';
       const stderr = error?.stderr || '';
       const message = error instanceof Error ? error.message : String(error);
-      
+
       logger.error(
-        { 
+        {
           error: message,
           stdout: stdout || undefined,
           stderr: stderr || undefined,
-          cwd: suiteDir
+          cwd: suiteDir,
         },
-        'letta-evals execution failed'
+        'letta-evals execution failed',
       );
-      
+
       // Include stderr in the error message if available
       const errorDetails = stderr ? `${message}\n${stderr}` : message;
       throw new Error(`Evaluation failed: ${errorDetails}`);
@@ -3745,7 +4034,7 @@ export class TaskProcessor {
    * Sleep helper for delays
    */
   private sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**
@@ -3755,7 +4044,7 @@ export class TaskProcessor {
   private async displayEvaluationResults(
     results: unknown[],
     summary: unknown,
-    delayMs: number = 800
+    delayMs: number = 800,
   ): Promise<void> {
     console.log('\n' + '='.repeat(70));
     console.log('  EVALUATION RESULTS');
@@ -3769,27 +4058,30 @@ export class TaskProcessor {
       for (let index = 0; index < results.length; index++) {
         const result = results[index];
         if (typeof result !== 'object' || result === null) continue;
-        
+
         const resultObj = result as Record<string, unknown>;
         const resultData = resultObj.result as Record<string, unknown> | undefined;
 
         // console.log(result);
-        
+
         if (!resultData) continue;
 
-        const grades = resultData.grades as Record<string, { score?: number; [key: string]: unknown }> | undefined;
-        const performance = resultData.performance as {
-          total_tokens?: number;
-          av_steps?: number;
-          token_per_score_point?: number;
-        } | undefined;
+        const grades = resultData.grades as
+          Record<string, { score?: number; [key: string]: unknown }> | undefined;
+        const performance = resultData.performance as
+          | {
+              total_tokens?: number;
+              av_steps?: number;
+              token_per_score_point?: number;
+            }
+          | undefined;
         const weightedScore = resultData.weighted_score as number | undefined;
 
         const sampleId = resultData.sample_id || `Sample ${index + 1}`;
 
         console.log(`┌─ RESULT ${index + 1}: ${sampleId}`);
         console.log('│');
-        
+
         // Check gate status for rationale display
         const blacklistScore = grades?.blacklist?.score;
         const agentDesignScore = grades?.agent_design?.score;
@@ -3797,7 +4089,7 @@ export class TaskProcessor {
         const agentDesignPassed = agentDesignScore === 1.0 || agentDesignScore === undefined;
         const gatesPassed = blacklistPassed && agentDesignPassed;
         const anyGateFailed = !blacklistPassed || !agentDesignPassed;
-        
+
         // Display final score
         if (weightedScore !== undefined) {
           console.log(`│  Score: ${weightedScore.toFixed(5)}`);
@@ -3819,27 +4111,27 @@ export class TaskProcessor {
           for (const [graderName, grader] of Object.entries(grades)) {
             const graderScore = grader?.score;
             const graderRationale = grader?.rationale as string | undefined;
-            
+
             if (graderScore !== undefined && graderScore !== null) {
               console.log(`│    • ${graderName}: ${graderScore.toFixed(5)}`);
-              
+
               // Display rationale based on gate status:
               // - If gates passed: only show rubric rationale (exclude blacklist and agent_design)
               // - If any gate failed: show both blacklist and agent_design rationales (even if one passed)
               // - Always show rubric rationale
-              const shouldShowRationale = 
-                (graderName === 'scout_rubric_grader') || // Always show rubric
+              const shouldShowRationale =
+                graderName === 'scout_rubric_grader' || // Always show rubric
                 (anyGateFailed && (graderName === 'blacklist' || graderName === 'agent_design')); // Show both gate rationales if any gate failed
-              
+
               if (shouldShowRationale && graderRationale) {
                 // Wrap long rationales to fit within the box width (accounting for indentation)
                 const maxWidth = 60; // Max width for rationale text
                 const indent = '│      '; // Indentation for rationale lines
-                
+
                 // Split rationale into words and wrap
                 const words = graderRationale.split(' ');
                 let currentLine = '';
-                
+
                 for (const word of words) {
                   if (currentLine.length + word.length + 1 <= maxWidth) {
                     currentLine += (currentLine ? ' ' : '') + word;
@@ -3850,7 +4142,7 @@ export class TaskProcessor {
                     currentLine = word;
                   }
                 }
-                
+
                 // Print the last line
                 if (currentLine) {
                   console.log(`${indent}${currentLine}`);
@@ -3891,18 +4183,23 @@ export class TaskProcessor {
     // Display summary
     if (summary && typeof summary === 'object') {
       const summaryObj = summary as Record<string, unknown>;
-      const metrics = summaryObj.metrics as {
-        avg_score_total?: number;
-        avg_score_attempted?: number;
-        by_metric?: Record<string, {
-          avg_score_total?: number;
-          avg_score_attempted?: number;
-        }>;
-      } | undefined;
+      const metrics = summaryObj.metrics as
+        | {
+            avg_score_total?: number;
+            avg_score_attempted?: number;
+            by_metric?: Record<
+              string,
+              {
+                avg_score_total?: number;
+                avg_score_attempted?: number;
+              }
+            >;
+          }
+        | undefined;
 
       console.log('┌─ SUMMARY');
       console.log('│');
-      
+
       // Calculate our own average using gate-based scoring logic
       let calculatedAvg: number | undefined = undefined;
       if (weightedScores.length > 0) {
@@ -3910,9 +4207,8 @@ export class TaskProcessor {
         console.log(`│  Final Score (gate-based): ${calculatedAvg.toFixed(5)}`);
         console.log(`│    (rubric score if gates pass, 0 if gates fail)`);
       }
-      
-      if (metrics) {
 
+      if (metrics) {
         // By metric breakdown
         if (metrics.by_metric && typeof metrics.by_metric === 'object') {
           const byMetric = metrics.by_metric;
@@ -3927,7 +4223,9 @@ export class TaskProcessor {
                 if (total !== undefined || attempted !== undefined) {
                   const totalStr = total !== undefined ? total.toFixed(5) : 'N/A';
                   const attemptedStr = attempted !== undefined ? attempted.toFixed(5) : 'N/A';
-                  console.log(`│    • ${metricName}: ${totalStr} (total) / ${attemptedStr} (attempted)`);
+                  console.log(
+                    `│    • ${metricName}: ${totalStr} (total) / ${attemptedStr} (attempted)`,
+                  );
                 }
               }
             }
@@ -3947,7 +4245,7 @@ export class TaskProcessor {
   private async cleanupMcpServers(workDir: string): Promise<void> {
     try {
       logger.info({ workDir }, 'Cleaning up MCP servers from Letta');
-      
+
       // Use letta CLI commands instead of Python imports
       const cleanupScript = `#!/bin/bash
   set +e  # Don't exit on errors
@@ -3975,42 +4273,45 @@ export class TaskProcessor {
 
   echo "MCP cleanup completed"
   `;
-      
+
       const cleanupScriptPath = path.join(workDir, 'cleanup_mcp.sh');
       await fs.writeFile(cleanupScriptPath, cleanupScript, 'utf-8');
       await fs.chmod(cleanupScriptPath, 0o755);
-      
+
       const env: Record<string, string> = {
         ...process.env,
         PATH: process.env.PATH || '/usr/local/bin:/usr/bin:/bin',
       };
-      
+
       if (process.env.LETTA_BASE_URL) {
         env.LETTA_BASE_URL = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
       } else if (process.env.LETTA_URL) {
         env.LETTA_BASE_URL = process.env.LETTA_URL.trim().replace(/^["']|["']$/g, '');
       }
-      
-      const { stdout, stderr } = await execAsync('./cleanup_mcp.sh', { 
+
+      const { stdout, stderr } = await execAsync('./cleanup_mcp.sh', {
         cwd: workDir,
         env,
         maxBuffer: 1024 * 1024,
-        timeout: 30000
+        timeout: 30000,
       });
-      
+
       if (stderr) {
         logger.debug({ stderr }, 'MCP cleanup stderr');
       }
-      
+
       try {
         await fs.unlink(cleanupScriptPath);
       } catch {
         // Ignore
       }
     } catch (error) {
-      logger.warn({ 
-        error: error instanceof Error ? error.message : String(error) 
-      }, 'Failed to clean up MCP servers (non-fatal)');
+      logger.warn(
+        {
+          error: error instanceof Error ? error.message : String(error),
+        },
+        'Failed to clean up MCP servers (non-fatal)',
+      );
     }
   }
 
@@ -4037,8 +4338,7 @@ export class TaskProcessor {
     return {
       processing: this.processingTasks.size,
       maxConcurrent: this.maxConcurrentTasks,
-      tasks: Array.from(this.processingTasks.keys())
+      tasks: Array.from(this.processingTasks.keys()),
     };
   }
 }
-

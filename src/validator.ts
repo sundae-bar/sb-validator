@@ -9,7 +9,12 @@ import { TaskProcessor } from './task-processor';
 import { sleep } from './retry';
 import logger from './logger';
 import type { ValidatorConfig, Task } from './types';
-import { submitSn121Weights, resolveUids, normalizeToSs58, type BittensorWeightTarget } from './weights';
+import {
+  submitSn121Weights,
+  resolveUids,
+  normalizeToSs58,
+  type BittensorWeightTarget,
+} from './weights';
 import { selectCurrentLeader, type LeaderboardEntry } from './leaderboard';
 import { computeBurnWeights, getEmissionsPercent, BURN_UID } from './weight-policy';
 import { computeWeightDecisionHash } from './integrity';
@@ -57,7 +62,12 @@ export class Validator {
   private nextSetAt: string | null = null;
   private startedAt: string | null = null;
   private lastHeartbeat: { at: string; ok: boolean; error?: string } | null = null;
-  private lastPoll: { at: string; ok: boolean; tasksFound?: number; error?: string } | null = null;
+  private lastPoll: {
+    at: string;
+    ok: boolean;
+    tasksFound?: number;
+    error?: string;
+  } | null = null;
 
   constructor(config: ValidatorConfig) {
     this.config = {
@@ -67,7 +77,7 @@ export class Validator {
       maxRetries: 3,
       retryDelay: 1000,
       logLevel: 'info',
-      ...config
+      ...config,
     };
 
     // Validate required config
@@ -96,18 +106,13 @@ export class Validator {
         pair,
         this.config.apiUrl,
         this.config.maxRetries,
-        this.config.retryDelay
+        this.config.retryDelay,
       );
 
       // Create task processor
       const workDir = process.env.WORK_DIR || '/tmp/validator-work';
       const maxConcurrentTasks = parseInt(process.env.MAX_CONCURRENT_TASKS || '1', 10);
-      this.taskProcessor = new TaskProcessor(
-        this.apiClient,
-        workDir,
-        maxConcurrentTasks,
-        pair
-      );
+      this.taskProcessor = new TaskProcessor(this.apiClient, workDir, maxConcurrentTasks, pair);
 
       // When a submission is scored, re-evaluate the leaderboard immediately so
       // a new #1 is reflected on-chain without waiting for the next interval.
@@ -119,18 +124,23 @@ export class Validator {
       const registration = await this.apiClient.register(
         this.config.displayName,
         this.config.version,
-        this.config.capacity
+        this.config.capacity,
       );
 
       this.evaluatorId = registration.evaluator_id;
       logger.info(
-        { evaluatorId: this.evaluatorId, hotkey: this.hotkey, workDir, maxConcurrentTasks },
-        'Validator initialized and registered'
+        {
+          evaluatorId: this.evaluatorId,
+          hotkey: this.hotkey,
+          workDir,
+          maxConcurrentTasks,
+        },
+        'Validator initialized and registered',
       );
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
-        'Failed to initialize validator'
+        'Failed to initialize validator',
       );
       throw error;
     }
@@ -153,11 +163,12 @@ export class Validator {
           this.lastHeartbeat = { at: new Date().toISOString(), ok: true };
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
-          this.lastHeartbeat = { at: new Date().toISOString(), ok: false, error: message };
-          logger.error(
-            { error: message },
-            'Heartbeat failed (will retry on next interval)'
-          );
+          this.lastHeartbeat = {
+            at: new Date().toISOString(),
+            ok: false,
+            error: message,
+          };
+          logger.error({ error: message }, 'Heartbeat failed (will retry on next interval)');
         }
       }
     }, interval);
@@ -285,7 +296,9 @@ export class Validator {
           } else {
             const submitStart = Date.now();
             try {
-              await submitSn121Weights(targets, { validatorSecret: this.config.mnemonic });
+              await submitSn121Weights(targets, {
+                validatorSecret: this.config.mnemonic,
+              });
               snapshot.submitted = true;
               this.lastSetAt = new Date().toISOString();
               logger.info(
@@ -414,9 +427,9 @@ export class Validator {
       {
         taskId: task.id,
         briefId: task.brief_id,
-        status: task.status
+        status: task.status,
       },
-      'Processing task'
+      'Processing task',
     );
 
     // Process task (handles claiming, file prep, evaluation, result submission)
@@ -434,7 +447,7 @@ export class Validator {
 
     logger.info(
       { pollInterval, apiUrl: this.config.apiUrl },
-      'Starting task polling loop (will run continuously)'
+      'Starting task polling loop (will run continuously)',
     );
 
     // Main loop - runs until this.running is set to false
@@ -449,7 +462,7 @@ export class Validator {
         this.lastPoll = {
           at: new Date().toISOString(),
           ok: true,
-          tasksFound: response.tasks?.length || 0
+          tasksFound: response.tasks?.length || 0,
         };
 
         // Reset error counter on success
@@ -457,12 +470,12 @@ export class Validator {
 
         if (response.tasks && response.tasks.length > 0) {
           logger.info(
-            { 
+            {
               count: response.tasks.length,
-              taskIds: response.tasks.map(t => t.id),
-              hotkey: this.hotkey
+              taskIds: response.tasks.map((t) => t.id),
+              hotkey: this.hotkey,
             },
-            'Found tasks, processing...'
+            'Found tasks, processing...',
           );
 
           // Process each task
@@ -478,9 +491,9 @@ export class Validator {
               logger.error(
                 {
                   taskId: task.id,
-                  error: error instanceof Error ? error.message : String(error)
+                  error: error instanceof Error ? error.message : String(error),
                 },
-                'Error processing task (continuing with next task)'
+                'Error processing task (continuing with next task)',
               );
               // Continue with next task - don't break the loop
             }
@@ -496,23 +509,27 @@ export class Validator {
       } catch (error) {
         consecutiveErrors++;
         const errorMessage = error instanceof Error ? error.message : String(error);
-        this.lastPoll = { at: new Date().toISOString(), ok: false, error: errorMessage };
+        this.lastPoll = {
+          at: new Date().toISOString(),
+          ok: false,
+          error: errorMessage,
+        };
 
         if (consecutiveErrors >= maxConsecutiveErrors) {
           logger.error(
             {
               consecutiveErrors,
               error: errorMessage,
-              maxConsecutiveErrors
+              maxConsecutiveErrors,
             },
-            `Multiple consecutive errors (${consecutiveErrors}), but continuing to poll...`
+            `Multiple consecutive errors (${consecutiveErrors}), but continuing to poll...`,
           );
           // Reset counter to avoid log spam, but keep going
           consecutiveErrors = 0;
         } else {
           logger.warn(
             { consecutiveErrors, error: errorMessage },
-            'Error in polling loop (will retry)'
+            'Error in polling loop (will retry)',
           );
         }
 
@@ -557,7 +574,7 @@ export class Validator {
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
-        'Fatal error in validator (stopping)'
+        'Fatal error in validator (stopping)',
       );
       this.running = false;
       throw error;
@@ -585,7 +602,12 @@ export class Validator {
     apiUrl: string;
     startedAt: string | null;
     lastHeartbeat: { at: string; ok: boolean; error?: string } | null;
-    lastPoll: { at: string; ok: boolean; tasksFound?: number; error?: string } | null;
+    lastPoll: {
+      at: string;
+      ok: boolean;
+      tasksFound?: number;
+      error?: string;
+    } | null;
     taskProcessor?: {
       processing: number;
       maxConcurrent: number;
@@ -600,8 +622,7 @@ export class Validator {
       startedAt: this.startedAt,
       lastHeartbeat: this.lastHeartbeat,
       lastPoll: this.lastPoll,
-      taskProcessor: this.taskProcessor?.getStatus()
+      taskProcessor: this.taskProcessor?.getStatus(),
     };
   }
 }
-

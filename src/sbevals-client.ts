@@ -20,22 +20,29 @@ const POLL_INTERVAL_MS = Number(process.env.SBEVALS_POLL_INTERVAL_SECONDS || '5'
 export async function submitSkillTask(
   pair: KeyringPair,
   taskId: string,
-  taskPayload: Record<string, unknown>
+  taskPayload: Record<string, unknown>,
 ): Promise<string> {
   logger.info({ taskId, url: `${SBEVALS_URL}/evaluations` }, 'Submitting skill task to sb-evals');
 
-  const response = await axios.post(`${SBEVALS_URL}/evaluations`, {
-    task_payload: taskPayload,
-  }, {
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Api-Key': SBEVALS_API_KEY,
+  const response = await axios.post(
+    `${SBEVALS_URL}/evaluations`,
+    {
+      task_payload: taskPayload,
     },
-    timeout: 30000,
-  });
+    {
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Api-Key': SBEVALS_API_KEY,
+      },
+      timeout: 30000,
+    },
+  );
 
   const jobId = response.data?.jobId;
-  if (!jobId) throw new Error(`sb-evals POST /evaluations returned no jobId: ${JSON.stringify(response.data)}`);
+  if (!jobId)
+    throw new Error(
+      `sb-evals POST /evaluations returned no jobId: ${JSON.stringify(response.data)}`,
+    );
 
   logger.info({ taskId, jobId }, 'sb-evals job created');
   return jobId;
@@ -44,10 +51,17 @@ export async function submitSkillTask(
 /**
  * Poll sb-evals until the job completes or times out. Returns the result object.
  */
-export async function pollSkillResult(pair: KeyringPair, jobId: string, timeoutMs: number): Promise<unknown> {
+export async function pollSkillResult(
+  pair: KeyringPair,
+  jobId: string,
+  timeoutMs: number,
+): Promise<unknown> {
   const deadline = Date.now() + timeoutMs;
 
-  logger.info({ jobId, timeoutMs, pollIntervalMs: POLL_INTERVAL_MS }, 'Polling sb-evals for skill result');
+  logger.info(
+    { jobId, timeoutMs, pollIntervalMs: POLL_INTERVAL_MS },
+    'Polling sb-evals for skill result',
+  );
 
   while (Date.now() < deadline) {
     const response = await axios.get(`${SBEVALS_URL}/evaluations/${jobId}`, {
@@ -69,7 +83,7 @@ export async function pollSkillResult(pair: KeyringPair, jobId: string, timeoutM
       throw new Error(`sb-evals job ${jobId} failed: ${errorMsg}`);
     }
 
-    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
 
   throw new Error(`sb-evals polling timed out after ${timeoutMs}ms for job ${jobId}`);

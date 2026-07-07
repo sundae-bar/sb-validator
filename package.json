@@ -8,7 +8,10 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "lint": "eslint .",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\" \"scripts/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\" \"scripts/**/*.ts\"",
     "test": "node --require ts-node/register/transpile-only --test test/*.test.ts",
+    "typecheck:test": "tsc -p tsconfig.test.json",
     "dry-run:weights": "ts-node --transpile-only scripts/dry-run-weights.ts",
     "docker:build": "docker buildx build --platform linux/amd64,linux/arm64 -t sundaebarai/sn121-validator:latest -t sundaebarai/sn121-validator:$(node -p \"require('./package.json').version\") .",
     "docker:push": "docker buildx build --platform linux/amd64,linux/arm64 -t sundaebarai/sn121-validator:latest -t sundaebarai/sn121-validator:$(node -p \"require('./package.json').version\") --push .",
@@ -42,6 +45,7 @@
     "@types/express": "^5.0.5",
     "@types/node": "^24.10.1",
     "eslint": "^10.4.1",
+    "prettier": "^3.9.4",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.60.1"

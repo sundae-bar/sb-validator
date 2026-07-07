@@ -34,7 +34,7 @@ export function createServer(validator: Validator): Express {
       status: 'ok',
       running: status.running,
       uptime: Math.round(process.uptime()),
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   });
 
@@ -58,15 +58,15 @@ export function createServer(validator: Validator): Express {
         // accepting this validator (vs. the plain reachability probe below).
         lastHeartbeat: status.lastHeartbeat,
         lastPoll: status.lastPoll,
-        taskProcessor: status.taskProcessor
+        taskProcessor: status.taskProcessor,
       },
       dependencies: {
         overall: report.overall,
         checkedAt: report.checkedAt,
         cached: report.cached,
-        ...report.dependencies
+        ...report.dependencies,
       },
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   });
 
@@ -82,34 +82,34 @@ export function createServer(validator: Validator): Express {
         evaluatorId: status.evaluatorId || 'not-registered',
         apiUrl: status.apiUrl,
         lastHeartbeat: status.lastHeartbeat,
-        lastPoll: status.lastPoll
+        lastPoll: status.lastPoll,
       },
       tasks: {
         processing: status.taskProcessor?.processing ?? 0,
-        maxConcurrent: status.taskProcessor?.maxConcurrent ?? 0
+        maxConcurrent: status.taskProcessor?.maxConcurrent ?? 0,
       },
       dependencies: {
         overall: report.overall,
         sbevals: {
           status: report.dependencies.sbevals.status,
-          latencyMs: report.dependencies.sbevals.latencyMs
+          latencyMs: report.dependencies.sbevals.latencyMs,
         },
         coordinator: {
           status: report.dependencies.coordinator.status,
-          latencyMs: report.dependencies.coordinator.latencyMs
+          latencyMs: report.dependencies.coordinator.latencyMs,
         },
         letta: {
           status: report.dependencies.letta.status,
-          latencyMs: report.dependencies.letta.latencyMs
-        }
+          latencyMs: report.dependencies.letta.latencyMs,
+        },
       },
       uptime: process.uptime(),
       memory: {
         used: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
         total: Math.round(process.memoryUsage().heapTotal / 1024 / 1024),
-        rss: Math.round(process.memoryUsage().rss / 1024 / 1024)
+        rss: Math.round(process.memoryUsage().rss / 1024 / 1024),
       },
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   });
 
@@ -123,15 +123,16 @@ export function createServer(validator: Validator): Express {
 
     res.json({
       competition: d?.competition ?? null,
-      vote: d && d.targets
-        ? {
-            targets: d.targets,
-            winnerUid: d.winnerUid,
-            leader: d.leader,
-            emissionsPercent: d.emissionsPercent,
-            decisionHash: d.decisionHash
-          }
-        : null,
+      vote:
+        d && d.targets
+          ? {
+              targets: d.targets,
+              winnerUid: d.winnerUid,
+              leader: d.leader,
+              emissionsPercent: d.emissionsPercent,
+              decisionHash: d.decisionHash,
+            }
+          : null,
       weights: {
         enabled: w.enabled,
         intervalMinutes: w.intervalMinutes,
@@ -141,10 +142,10 @@ export function createServer(validator: Validator): Express {
         submitted: d?.submitted ?? false,
         error: d?.error ?? null,
         lastSetAt: w.lastSetAt,
-        nextSetAt: w.nextSetAt
+        nextSetAt: w.nextSetAt,
       },
       ...(d ? {} : { note: 'No weight cycle has completed yet — check again shortly.' }),
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
     });
   });
 
@@ -157,13 +158,14 @@ export function createServer(validator: Validator): Express {
         health: '/health — process liveness only (used by container healthchecks)',
         status: '/status — validator state + live dependency checks (sbevals, coordinator, letta)',
         metrics: '/metrics — uptime, memory, task counts, dependency latencies',
-        competition: '/competition — current competition + the validator\'s weight vote (targets, decision hash, last/next set time)'
+        competition:
+          "/competition — current competition + the validator's weight vote (targets, decision hash, last/next set time)",
       },
       dependencies: {
         sbevals: 'skill evaluation sidecar (required for skill challenges)',
         coordinator: 'Sundae Bar coordinator API (required)',
-        letta: 'legacy agent backend (optional, dormant)'
-      }
+        letta: 'legacy agent backend (optional, dormant)',
+      },
     });
   });
 
@@ -179,10 +181,7 @@ export function createServer(validator: Validator): Express {
 /**
  * Start HTTP server using Express
  */
-export async function startServer(
-  app: Express,
-  port: number = 8080
-): Promise<void> {
+export async function startServer(app: Express, port: number = 8080): Promise<void> {
   return new Promise((resolve, reject) => {
     try {
       const server = app.listen(port, () => {
@@ -191,16 +190,13 @@ export async function startServer(
       });
 
       server.on('error', (error: Error) => {
-        logger.error(
-          { error: error.message },
-          'HTTP server error'
-        );
+        logger.error({ error: error.message }, 'HTTP server error');
         reject(error);
       });
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
-        'Failed to start HTTP server'
+        'Failed to start HTTP server',
       );
       reject(error);
     }
