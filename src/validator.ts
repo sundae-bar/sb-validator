@@ -9,7 +9,9 @@ import { TaskProcessor } from './task-processor';
 import { sleep } from './retry';
 import logger from './logger';
 import type { ValidatorConfig, Task } from './types';
-import { submitSn121Weights, type BittensorWeightTarget } from './weights';
+import { submitSn121Weights, resolveUids, normalizeToSs58, type BittensorWeightTarget } from './weights';
+import { selectCurrentLeader } from './leaderboard';
+import { computeBurnWeights, getEmissionsPercent, BURN_UID } from './weight-policy';
 
 export class Validator {
   private config: ValidatorConfig;
@@ -20,6 +22,10 @@ export class Validator {
   private running: boolean = false;
   private heartbeatInterval: NodeJS.Timeout | null = null;
   private weightsInterval: NodeJS.Timeout | null = null;
+  // Serialize weight cycles: only one setWeights in flight at a time; a trigger
+  // that arrives mid-cycle is coalesced into exactly one trailing re-run.
+  private weightUpdateRunning: boolean = false;
+  private weightUpdatePending: boolean = false;
   private startedAt: string | null = null;
   private lastHeartbeat: { at: string; ok: boolean; error?: string } | null = null;
   private lastPoll: { at: string; ok: boolean; tasksFound?: number; error?: string } | null = null;
@@ -73,6 +79,12 @@ export class Validator {
         maxConcurrentTasks,
         pair
       );
+
+      // When a submission is scored, re-evaluate the leaderboard immediately so
+      // a new #1 is reflected on-chain without waiting for the next interval.
+      this.taskProcessor.setOnScored(() => {
+        void this.runWeightCycle('event');
+      });
 
       // Register evaluator
       const registration = await this.apiClient.register(
@@ -136,177 +148,151 @@ export class Validator {
   }
 
   /**
-   * Start weights fetch loop
+   * Compute and submit weights for the current competition standings.
+   *
+   * The weight DECISION is made here, locally and deterministically — the
+   * coordinator is only a data source. Each cycle:
+   *   1. Pulls the active competition + leaderboard (read-only data).
+   *   2. Deterministically selects the current #1 miner by score.
+   *   3. Resolves that miner's hotkey → metagraph UID.
+   *   4. Builds a {winner: EMISSIONS_PERCENT, UID 0: remainder} weight vector
+   *      (burns 100% to UID 0 if there is no eligible winner).
+   *   5. Submits it on-chain via setWeights.
+   *
+   * Stateless: the winner is always recomputed from freshly-pulled data, so
+   * "beats the current #1" is handled implicitly and restarts lose nothing.
+   *
+   * A mutex serializes cycles: if one is running when another is triggered, the
+   * trigger is coalesced into a single trailing re-run so two setWeights calls
+   * never race.
+   */
+  private async runWeightCycle(reason: 'interval' | 'event' | 'startup'): Promise<void> {
+    if (!this.apiClient || !this.running) {
+      return;
+    }
+
+    if (this.weightUpdateRunning) {
+      this.weightUpdatePending = true;
+      logger.debug({ reason }, 'Weight cycle already running; queued a trailing re-run');
+      return;
+    }
+
+    this.weightUpdateRunning = true;
+    try {
+      do {
+        this.weightUpdatePending = false;
+        const cycleStart = Date.now();
+        logger.info({ reason, hotkey: this.hotkey }, 'Starting weight cycle');
+
+        try {
+          const comp = await this.apiClient.fetchActiveCompetition();
+          const leader = selectCurrentLeader(comp);
+
+          let winnerUid: number | null = null;
+          if (leader) {
+            const ss58 = normalizeToSs58(leader.miner_hotkey);
+            const uidMap = await resolveUids([ss58]);
+            winnerUid = uidMap.get(ss58) ?? null;
+          }
+
+          const emissionsPercent = getEmissionsPercent();
+          const targets: BittensorWeightTarget[] = computeBurnWeights(winnerUid, emissionsPercent);
+
+          logger.info(
+            {
+              reason,
+              competitionId: comp?.competition_id ?? null,
+              leaderHotkey: leader?.miner_hotkey ?? null,
+              leaderScore: leader?.best_score ?? null,
+              winnerUid,
+              emissionsPercent,
+              burnUid: BURN_UID,
+              targets,
+              burningAll: winnerUid === null,
+            },
+            winnerUid === null
+              ? 'No eligible winner — burning 100% to UID 0'
+              : 'Computed local weight targets (winner takes emissions share, rest burned)',
+          );
+
+          if (process.env.BITTENSOR_WEIGHTS_DISABLED === 'true') {
+            logger.info(
+              { reason, targets },
+              'BITTENSOR_WEIGHTS_DISABLED=true — skipping on-chain setWeights (dry run)',
+            );
+          } else if (!this.config.mnemonic) {
+            logger.warn({ reason }, 'No key configured; skipping on-chain setWeights');
+          } else {
+            const submitStart = Date.now();
+            try {
+              await submitSn121Weights(targets, { validatorSecret: this.config.mnemonic });
+              logger.info(
+                {
+                  reason,
+                  submissionTimeMs: Date.now() - submitStart,
+                  totalCycleTimeMs: Date.now() - cycleStart,
+                  targets,
+                },
+                'Successfully submitted weights on-chain',
+              );
+            } catch (submitError) {
+              logger.error(
+                {
+                  reason,
+                  error: submitError instanceof Error ? submitError.message : String(submitError),
+                  errorStack: submitError instanceof Error ? submitError.stack : undefined,
+                },
+                'Failed to submit weights on-chain via setWeights',
+              );
+            }
+          }
+        } catch (error) {
+          logger.error(
+            {
+              reason,
+              error: error instanceof Error ? error.message : String(error),
+              errorStack: error instanceof Error ? error.stack : undefined,
+            },
+            'Weight cycle failed (will retry on next interval/event)',
+          );
+        }
+      } while (this.weightUpdatePending && this.running);
+    } finally {
+      this.weightUpdateRunning = false;
+    }
+  }
+
+  /**
+   * Start the periodic weight loop. The interval keeps on-chain weights fresh;
+   * scoring events trigger extra cycles in between via runWeightCycle('event').
    */
   private startWeights(): void {
     if (this.weightsInterval) {
       clearInterval(this.weightsInterval);
     }
 
-    const interval = (this.config.weightsInterval || 30) * 60 * 1000; // Convert minutes to milliseconds
+    const intervalMinutes = this.config.weightsInterval || 30;
+    const interval = intervalMinutes * 60 * 1000; // minutes → ms
 
-    this.weightsInterval = setInterval(async () => {
-      if (this.apiClient && this.running) {
-        const weightsFetchStartTime = Date.now();
-        logger.info(
-          {
-            intervalMinutes: this.config.weightsInterval || 30,
-            hotkey: this.hotkey,
-          },
-          'Starting weights fetch cycle'
-        );
+    // Kick one cycle shortly after start so weights aren't stale until the
+    // first interval elapses.
+    void this.runWeightCycle('startup');
 
-        try {
-          logger.debug('Fetching bittensor weights from coordinator API...');
-          const weights = await this.apiClient.fetchBittensorWeights();
-          const fetchTime = Date.now() - weightsFetchStartTime;
-
-          // Calculate weight sum for validation
-          const weightSum = weights.weights.reduce((sum, w) => sum + w.weight, 0);
-          const weightSumRounded = Math.round(weightSum * 1000000) / 1000000;
-
-          logger.info(
-            {
-              window_start: weights.window_start,
-              window_end: weights.window_end,
-              total_minutes: weights.total_minutes,
-              weights_count: weights.weights.length,
-              weightSum: weightSumRounded,
-              expectedSum: 1.0,
-              weightSumDifference: Math.abs(weightSumRounded - 1.0),
-              fetchTimeMs: fetchTime,
-              weights: weights.weights.map((w) => ({ uid: w.uid, weight: w.weight })),
-            },
-            'Fetched bittensor weights from coordinator',
-          );
-
-          // Validate weight sum
-          if (Math.abs(weightSumRounded - 1.0) > 0.01) {
-            logger.warn(
-              {
-                weightSum: weightSumRounded,
-                expectedSum: 1.0,
-                difference: Math.abs(weightSumRounded - 1.0),
-              },
-              'WARNING: Weight sum does not equal 1.0 (may cause issues on-chain)'
-            );
-          }
-
-          const weightsDisabled = process.env.BITTENSOR_WEIGHTS_DISABLED === 'true';
-          logger.debug(
-            {
-              BITTENSOR_WEIGHTS_DISABLED: process.env.BITTENSOR_WEIGHTS_DISABLED,
-              weightsDisabled,
-            },
-            'Checking if weights submission is disabled'
-          );
-
-          if (weightsDisabled) {
-            logger.info(
-              {
-                reason: 'BITTENSOR_WEIGHTS_DISABLED env var is set to true',
-                weightsCount: weights.weights.length,
-              },
-              'Skipping on-chain bittensor setWeights submission',
-            );
-            return;
-          }
-
-          // Use the already-resolved mnemonic/key from config (covers VALIDATOR_MNEMONIC, HOTKEY_PATH, PRIVATE_KEY)
-          const validatorSecret = this.config.mnemonic;
-          logger.debug(
-            {
-              hasValidatorSecret: !!validatorSecret,
-              validatorSecretLength: validatorSecret.length,
-              validatorSecretPrefix: validatorSecret.substring(0, 10) + '...',
-            },
-            'Checking validator secret'
-          );
-
-          if (!validatorSecret) {
-            logger.warn(
-              { weightsCount: weights.weights.length },
-              'No key configured; skipping on-chain bittensor setWeights submission',
-            );
-            return;
-          }
-
-          const targets: BittensorWeightTarget[] = weights.weights.map((w) => ({
-            uid: w.uid,
-            weight: w.weight,
-          }));
-
-          logger.info(
-            {
-              targetsCount: targets.length,
-              targetsSample: targets.slice(0, 10),
-              totalWeight: Math.round(targets.reduce((sum, t) => sum + t.weight, 0) * 1000000) / 1000000,
-            },
-            'Prepared weight targets for on-chain submission'
-          );
-
-          const submissionStartTime = Date.now();
-          try {
-            logger.info('Calling submitSn121Weights...');
-            await submitSn121Weights(targets, {
-              validatorSecret,
-            });
-            const submissionTime = Date.now() - submissionStartTime;
-            logger.info(
-              {
-                submissionTimeMs: submissionTime,
-                totalCycleTimeMs: Date.now() - weightsFetchStartTime,
-                targetsCount: targets.length,
-              },
-              'Successfully submitted bittensor weights on-chain'
-            );
-          } catch (submitError) {
-            const submissionTime = Date.now() - submissionStartTime;
-            logger.error(
-              {
-                error:
-                  submitError instanceof Error ? submitError.message : String(submitError),
-                errorStack: submitError instanceof Error ? submitError.stack : undefined,
-                submissionTimeMs: submissionTime,
-                totalCycleTimeMs: Date.now() - weightsFetchStartTime,
-                targetsCount: targets.length,
-              },
-              'Failed to submit bittensor weights on-chain via setWeights',
-            );
-          }
-        } catch (error) {
-          const totalTime = Date.now() - weightsFetchStartTime;
-          logger.error(
-            {
-              error: error instanceof Error ? error.message : String(error),
-              errorStack: error instanceof Error ? error.stack : undefined,
-              totalTimeMs: totalTime,
-            },
-            'Failed to fetch bittensor weights (will retry on next interval)',
-          );
-        }
-      } else {
-        logger.debug(
-          {
-            hasApiClient: !!this.apiClient,
-            running: this.running,
-          },
-          'Skipping weights fetch (validator not running or API client not available)'
-        );
-      }
+    this.weightsInterval = setInterval(() => {
+      void this.runWeightCycle('interval');
     }, interval);
 
-    logger.info({ intervalMinutes: this.config.weightsInterval || 30 }, 'Weights fetch started');
+    logger.info({ intervalMinutes }, 'Weight loop started (local decision)');
   }
 
   /**
-   * Stop weights fetch loop
+   * Stop weights loop
    */
   private stopWeights(): void {
     if (this.weightsInterval) {
       clearInterval(this.weightsInterval);
       this.weightsInterval = null;
-      logger.info('Weights fetch stopped');
+      logger.info('Weight loop stopped');
     }
   }
 

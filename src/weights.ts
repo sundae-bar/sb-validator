@@ -17,7 +17,7 @@
 import { ApiPromise, WsProvider } from '@polkadot/api';
 import type { ISubmittableResult, AnyJson } from '@polkadot/types/types';
 import { Keyring } from '@polkadot/keyring';
-import { cryptoWaitReady } from '@polkadot/util-crypto';
+import { cryptoWaitReady, encodeAddress, decodeAddress } from '@polkadot/util-crypto';
 
 import logger from './logger';
 
@@ -82,6 +82,132 @@ const DEFAULT_VERSION_KEY = 0;
 const DEFAULT_SS58_FORMAT = 42;
 
 /**
+ * Create a Polkadot API client wired with the `subnetInfoRuntimeApi.getMetagraph`
+ * runtime definition. Shared by weight submission (validator-permit check) and
+ * miner UID resolution so the runtime config lives in exactly one place.
+ *
+ * The caller owns the returned `api` and must `disconnect()` it.
+ */
+const createSubnetApi = async (wsEndpoint: string): Promise<ApiPromise> => {
+    await cryptoWaitReady();
+    const provider = new WsProvider(wsEndpoint);
+    return ApiPromise.create({
+        provider,
+        noInitWarn: true,
+        runtime: {
+            subnetInfoRuntimeApi: [
+                {
+                    methods: {
+                        getMetagraph: {
+                            description: 'Get registered validators and miners for a subnet',
+                            params: [
+                                {
+                                    name: 'netuid',
+                                    type: 'u16',
+                                },
+                            ],
+                            type: 'Json',
+                        },
+                    },
+                    version: 1,
+                },
+            ],
+        },
+    });
+};
+
+/**
+ * Normalize any hotkey representation (hex public key or SS58 in any format)
+ * to a canonical SS58 address. `decodeAddress` accepts hex/u8a/SS58 and returns
+ * the raw public key, which we re-encode in the target SS58 format.
+ *
+ * This is required because the validator's own hotkey is hex
+ * (`u8aToHex(pair.publicKey)`) while the metagraph reports SS58 (format 42),
+ * and the coordinator's leaderboard may report either.
+ */
+export const normalizeToSs58 = (hotkey: string, ss58Format: number = DEFAULT_SS58_FORMAT): string => {
+    const publicKey = decodeAddress(hotkey);
+    return encodeAddress(publicKey, ss58Format);
+};
+
+/**
+ * Resolve a set of miner hotkeys to their metagraph UIDs on the given subnet.
+ *
+ * Opens a short-lived connection, reads the metagraph `hotkeys[]`, and returns
+ * a Map keyed by normalized SS58 hotkey → UID. Hotkeys not registered on the
+ * subnet are simply absent from the map (caller decides what that means).
+ */
+export const resolveUids = async (
+    hotkeys: readonly string[],
+    cfg?: { wsEndpoint?: string; netuid?: number; ss58Format?: number }
+): Promise<Map<string, number>> => {
+    const result = new Map<string, number>();
+    if (!hotkeys || hotkeys.length === 0) {
+        return result;
+    }
+
+    const wsEndpoint = cfg?.wsEndpoint?.trim() || DEFAULT_WS_ENDPOINT;
+    const netuid = cfg?.netuid ?? DEFAULT_NETUID_121;
+    const ss58Format = cfg?.ss58Format ?? DEFAULT_SS58_FORMAT;
+
+    const api = await createSubnetApi(wsEndpoint);
+    try {
+        const metagraphResult = await api.call.subnetInfoRuntimeApi.getMetagraph(netuid);
+        const metagraphData = metagraphResult.toHuman() as Record<string, unknown> | null;
+        const metagraphHotkeys = (metagraphData?.hotkeys as unknown[]) || [];
+
+        // Build a normalized index of the on-chain hotkeys once.
+        const uidByHotkey = new Map<string, number>();
+        metagraphHotkeys.forEach((hk, uid) => {
+            if (typeof hk !== 'string') return;
+            try {
+                uidByHotkey.set(normalizeToSs58(hk, ss58Format), uid);
+            } catch {
+                // Skip malformed metagraph entries rather than fail the whole resolve.
+            }
+        });
+
+        for (const hotkey of hotkeys) {
+            let ss58: string;
+            try {
+                ss58 = normalizeToSs58(hotkey, ss58Format);
+            } catch (error) {
+                logger.warn(
+                    { hotkey, error: error instanceof Error ? error.message : String(error) },
+                    'sn121: could not normalize miner hotkey; skipping UID resolution for it'
+                );
+                continue;
+            }
+            const uid = uidByHotkey.get(ss58);
+            if (uid !== undefined) {
+                result.set(ss58, uid);
+            } else {
+                logger.warn({ hotkey, ss58, netuid }, 'sn121: miner hotkey not found in metagraph');
+            }
+        }
+
+        logger.debug(
+            {
+                requested: hotkeys.length,
+                resolved: result.size,
+                metagraphSize: metagraphHotkeys.length,
+            },
+            'sn121: resolved miner hotkeys to UIDs'
+        );
+        return result;
+    } finally {
+        try {
+            await api.disconnect();
+        } catch (err) {
+            logger.warn(
+                { err, errorMessage: err instanceof Error ? err.message : String(err) },
+                'sn121: error disconnecting metagraph api after resolveUids'
+            );
+        }
+    }
+};
+
+/**
  * Utility: clean up and deduplicate weight targets.
  *
  * Why this exists:
@@ -124,10 +250,11 @@ const dedupeTargets = (targets: readonly BittensorWeightTarget[]): BittensorWeig
 /**
  * Core function you will call from your validator.
  *
- * Typical usage pattern (pseudocode):
+ * Typical usage pattern (pseudocode) — targets are decided locally by the
+ * validator (see weight-policy.computeBurnWeights), not fetched from a server:
  *
- *   const response = await apiClient.fetchBittensorWeights();
- *   const weightTargets = response.weights.map(w => ({ uid: w.uid, weight: w.weight }));
+ *   const winnerUid = (await resolveUids([leaderHotkey])).get(leaderHotkey) ?? null;
+ *   const weightTargets = computeBurnWeights(winnerUid); // {winner: 0.2, uid 0: 0.8}
  *
  *   await submitSn121Weights(weightTargets, {
  *       validatorSecret: process.env.VALIDATOR_MNEMONIC ?? '',
@@ -237,58 +364,11 @@ export const submitSn121Weights = async (
     //
     //    cryptoWaitReady() ensures the WASM crypto backends are ready before
     //    we try to construct or use sr25519 keys.
-    logger.debug('sn121: waiting for crypto to be ready...');
-    const cryptoStartTime = Date.now();
-    await cryptoWaitReady();
-    const cryptoReadyTime = Date.now() - cryptoStartTime;
-    logger.debug(
-        {
-            cryptoReadyTimeMs: cryptoReadyTime,
-        },
-        'sn121: crypto ready'
-    );
-
-    logger.debug(
-        {
-            wsEndpoint,
-        },
-        'sn121: creating WebSocket provider...'
-    );
-    const providerStartTime = Date.now();
-    const provider = new WsProvider(wsEndpoint);
-    logger.debug(
-        {
-            providerCreatedTimeMs: Date.now() - providerStartTime,
-        },
-        'sn121: WebSocket provider created'
-    );
-
-    logger.debug('sn121: creating ApiPromise...');
+    logger.debug('sn121: creating ApiPromise (crypto + provider + runtime)...');
     const apiStartTime = Date.now();
-    // Create API with runtime definition for metagraph queries
-    const api = await ApiPromise.create({
-        provider,
-        noInitWarn: true,
-        runtime: {
-            subnetInfoRuntimeApi: [
-                {
-                    methods: {
-                        getMetagraph: {
-                            description: 'Get registered validators and miners for a subnet',
-                            params: [
-                                {
-                                    name: 'netuid',
-                                    type: 'u16',
-                                },
-                            ],
-                            type: 'Json',
-                        },
-                    },
-                    version: 1,
-                },
-            ],
-        },
-    });
+    // Create API with runtime definition for metagraph queries (shared helper
+    // also waits for crypto and builds the WsProvider).
+    const api = await createSubnetApi(wsEndpoint);
     const apiReadyTime = Date.now() - apiStartTime;
     logger.info(
         {

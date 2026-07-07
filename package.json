@@ -1,6 +1,6 @@
 {
   "name": "sundae-bar-validator",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "Secure validator client for sundae_bar SN121 subnet",
   "main": "dist/index.js",
   "scripts": {
@@ -8,7 +8,8 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "lint": "eslint .",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node --require ts-node/register/transpile-only --test test/*.test.ts",
+    "dry-run:weights": "ts-node --transpile-only scripts/dry-run-weights.ts",
     "docker:build": "docker buildx build --platform linux/amd64,linux/arm64 -t sundaebarai/sn121-validator:latest -t sundaebarai/sn121-validator:$(node -p \"require('./package.json').version\") .",
     "docker:push": "docker buildx build --platform linux/amd64,linux/arm64 -t sundaebarai/sn121-validator:latest -t sundaebarai/sn121-validator:$(node -p \"require('./package.json').version\") --push .",
     "tag:latest": "git tag v$(node -p \"require('./package.json').version\")",

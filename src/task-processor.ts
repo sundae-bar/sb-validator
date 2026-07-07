@@ -22,12 +22,27 @@ import type { Task } from './types';
 import { LettaClient, type FileMetadata } from './letta-client';
 import type { KeyringPair } from '@polkadot/keyring/types';
 import { submitSkillTask, pollSkillResult } from './sbevals-client';
+import { getHotkey } from './signature';
+import { normalizeToSs58 } from './weights';
+import { computeIntegrityHash } from './integrity';
 
 const execAsync = promisify(exec);
 
 interface ProcessingTask {
   taskId: string;
   startedAt: Date;
+}
+
+/**
+ * Emitted after the validator scores a submission. The weights loop listens for
+ * this to re-evaluate the leaderboard immediately (rather than only on its
+ * periodic interval) so a new #1 is reflected on-chain promptly.
+ */
+export interface ScoredEvent {
+  taskId: string;
+  competitionId: string | null;
+  minerHotkey: string | null;
+  score: number | null;
 }
 
 export class TaskProcessor {
@@ -39,6 +54,7 @@ export class TaskProcessor {
   private lettaClient: LettaClient | null = null;
   private weightsIntervalMs: number;
   private filesystemDataFolderId: string | null = null; // Cache folder ID to avoid lookup every time
+  private onScored: ((event: ScoredEvent) => void) | null = null;
   constructor(
     apiClient: ApiClient,
     workDir: string = '/tmp/validator-work',
@@ -66,6 +82,14 @@ export class TaskProcessor {
         );
       }
     }
+  }
+
+  /**
+   * Register a listener fired after each submission is scored. Used by the
+   * validator to trigger an immediate weight re-evaluation.
+   */
+  setOnScored(cb: (event: ScoredEvent) => void): void {
+    this.onScored = cb;
   }
 
   /**
@@ -589,18 +613,84 @@ export class TaskProcessor {
       );
     }
 
+    const timestamp = new Date().toISOString();
+
+    // Miner identity + competition come from the task metadata set by the
+    // coordinator. When present, attach an integrity hash + the hashed scoring
+    // fields so the web app can recompute and verify the result against what
+    // the validator actually scored (see integrity.ts). Missing metadata is
+    // non-fatal — the task still completes, just without attribution/hash.
+    const metadata = (taskPayload.metadata ?? {}) as Record<string, unknown>;
+    const competitionId =
+      typeof metadata.competition_id === 'string' ? metadata.competition_id : null;
+    const rawMinerHotkey =
+      typeof metadata.miner_hotkey === 'string' ? metadata.miner_hotkey : null;
+
+    let minerHotkeySs58: string | null = null;
+    let integrity: { integrity_hash: string; scoring: Record<string, unknown> } | null = null;
+
+    if (competitionId && rawMinerHotkey && this.pair) {
+      try {
+        minerHotkeySs58 = normalizeToSs58(rawMinerHotkey);
+        const validatorHotkeySs58 = normalizeToSs58(getHotkey(this.pair));
+        const verdict: 'passed' | 'failed' = verdictFailed ? 'failed' : 'passed';
+        const scoringInput = {
+          taskId,
+          competition_id: competitionId,
+          miner_hotkey: minerHotkeySs58,
+          validator_hotkey: validatorHotkeySs58,
+          score: finalScore ?? 0,
+          verdict,
+          timestamp,
+        };
+        integrity = {
+          integrity_hash: computeIntegrityHash(scoringInput),
+          scoring: scoringInput,
+        };
+      } catch (error) {
+        logger.warn(
+          { taskId, error: error instanceof Error ? error.message : String(error) },
+          'Failed to compute integrity hash (submitting result without it)',
+        );
+      }
+    } else {
+      logger.warn(
+        { taskId, hasCompetitionId: !!competitionId, hasMinerHotkey: !!rawMinerHotkey },
+        'Task metadata missing competition_id/miner_hotkey — result will lack integrity hash + weight attribution',
+      );
+    }
+
     const compactPayload = {
       results: compactResults,
       score: finalScore,
       tests_count: compactResults.length,
       duration_seconds: evaluationResult?.duration_seconds ?? null,
       total_tokens: totalTokens,
-      timestamp: new Date().toISOString(),
+      timestamp,
+      ...(integrity ?? {}),
     };
 
     logger.info({ taskId, score: finalScore, testsCount: compactResults.length, totalTokens }, 'Submitting sb-evals skill results');
     await this.apiClient.submitResults(taskId, 'completed', compactPayload);
     logger.info({ taskId }, 'Skill task processed successfully via sb-evals');
+
+    // Fire-and-forget: notify the weights loop so it can re-evaluate the
+    // leaderboard immediately. Never let a weight-update failure fail the task.
+    if (this.onScored) {
+      try {
+        this.onScored({
+          taskId,
+          competitionId,
+          minerHotkey: minerHotkeySs58,
+          score: finalScore,
+        });
+      } catch (error) {
+        logger.warn(
+          { taskId, error: error instanceof Error ? error.message : String(error) },
+          'onScored listener threw (ignored)',
+        );
+      }
+    }
   }
 
   /**

@@ -13,6 +13,7 @@ import type {
   ClaimResponse,
   ResultResponse
 } from './types';
+import type { ActiveCompetition } from './leaderboard';
 import FormData from 'form-data';
 import * as fs from 'fs';
 
@@ -407,47 +408,49 @@ export class ApiClient {
   }
 
   /**
-   * Fetch bittensor weights from backend for this validator's hotkey.
+   * Fetch the active competition + leaderboard from the coordinator.
+   *
+   * This is read-only DATA, not a weight verdict: the validator decides weights
+   * itself from this data (see weight-policy.ts). The coordinator no longer
+   * tells the validator what weights to set.
    *
    * Backend endpoint:
-   * POST /api/v2/validators/weights
+   * GET /api/v2/validators/competitions/active
+   *
+   * Returns null when there is no active competition (204/empty response).
    */
-  async fetchBittensorWeights(): Promise<{
-    window_start: string;
-    window_end: string;
-    total_minutes: number;
-    weights: { uid: number; weight: number }[];
-  }> {
-    const path = '/weights';
-    const url = this.getApiPath(path);
+  async fetchActiveCompetition(): Promise<ActiveCompetition | null> {
+    const url = this.getApiPath('/competitions/active');
 
-    const payload = {
-      hotkey: this.hotkey,
-    };
-
-    // Sign the payload for signature middleware
+    // Sign a small payload so the coordinator can authenticate the caller,
+    // matching the signing convention used by the other endpoints.
+    const payload = { hotkey: this.hotkey };
     const signature = signRequest(this.pair, payload);
 
     try {
-      const response = await this.client.post(url, payload, {
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Signature': signature,
-        },
-      });
+      const response = await retryWithCondition(
+        async () =>
+          this.client.get<ActiveCompetition>(url, {
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Signature': signature,
+              'X-Hotkey': this.hotkey,
+            },
+          }),
+        this.isRetryableError.bind(this),
+        { maxRetries: this.maxRetries, retryDelay: this.retryDelay },
+      );
 
-      return response.data as {
-        window_start: string;
-        window_end: string;
-        total_minutes: number;
-        weights: { uid: number; weight: number }[];
-      };
+      // No content / empty body → no active competition.
+      if (response.status === 204 || !response.data || !response.data.competition_id) {
+        return null;
+      }
+
+      return response.data;
     } catch (error) {
       logger.error(
-        {
-          error: error instanceof Error ? error.message : String(error),
-        },
-        'Failed to fetch bittensor weights',
+        { error: error instanceof Error ? error.message : String(error) },
+        'Failed to fetch active competition',
       );
       throw error;
     }
