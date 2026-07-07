@@ -9,6 +9,16 @@ import { logger } from './logger';
 import { checkDependencies } from './dependency-checks';
 import type { Validator } from './validator';
 
+// Resolved at runtime so the endpoint reports the shipped package version
+// (a static import would emit package.json outside tsconfig's rootDir).
+let packageVersion = 'unknown';
+try {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  packageVersion = require('../package.json').version;
+} catch {
+  packageVersion = process.env.VERSION || 'unknown';
+}
+
 export function createServer(validator: Validator): Express {
   const app = express();
 
@@ -107,7 +117,7 @@ export function createServer(validator: Validator): Express {
   app.get('/', (req: Request, res: Response) => {
     res.json({
       service: 'Sundae Bar Validator',
-      version: '1.0.0',
+      version: packageVersion,
       endpoints: {
         health: '/health — process liveness only (used by container healthchecks)',
         status: '/status — validator state + live dependency checks (sbevals, coordinator, letta)',
