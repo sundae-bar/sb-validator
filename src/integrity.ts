@@ -14,16 +14,16 @@ import { createHash } from 'crypto';
 /** The exact fields covered by the integrity hash. Keep this stable — the web
  *  app recomputes the hash from these same fields. */
 export interface ScoringIntegrityInput {
-    taskId: string;
-    competition_id: string;
-    /** SS58, normalized. */
-    miner_hotkey: string;
-    /** SS58, normalized. */
-    validator_hotkey: string;
-    score: number;
-    verdict: 'passed' | 'failed';
-    /** ISO timestamp. */
-    timestamp: string;
+  taskId: string;
+  competition_id: string;
+  /** SS58, normalized. */
+  miner_hotkey: string;
+  /** SS58, normalized. */
+  validator_hotkey: string;
+  score: number;
+  verdict: 'passed' | 'failed';
+  /** ISO timestamp. */
+  timestamp: string;
 }
 
 /**
@@ -32,38 +32,38 @@ export interface ScoringIntegrityInput {
  * and functions are rejected (they must not silently drop from the digest).
  */
 export const canonicalize = (value: unknown): string => {
-    const encode = (v: unknown): string => {
-        if (v === null) return 'null';
+  const encode = (v: unknown): string => {
+    if (v === null) return 'null';
 
-        const t = typeof v;
-        if (t === 'number') {
-            if (!Number.isFinite(v as number)) {
-                throw new Error('canonicalize: non-finite number');
-            }
-            return JSON.stringify(v);
-        }
-        if (t === 'string' || t === 'boolean') {
-            return JSON.stringify(v);
-        }
-        if (t === 'undefined' || t === 'function') {
-            throw new Error(`canonicalize: unsupported value of type ${t}`);
-        }
+    const t = typeof v;
+    if (t === 'number') {
+      if (!Number.isFinite(v as number)) {
+        throw new Error('canonicalize: non-finite number');
+      }
+      return JSON.stringify(v);
+    }
+    if (t === 'string' || t === 'boolean') {
+      return JSON.stringify(v);
+    }
+    if (t === 'undefined' || t === 'function') {
+      throw new Error(`canonicalize: unsupported value of type ${t}`);
+    }
 
-        if (Array.isArray(v)) {
-            return `[${v.map(encode).join(',')}]`;
-        }
+    if (Array.isArray(v)) {
+      return `[${v.map(encode).join(',')}]`;
+    }
 
-        if (t === 'object') {
-            const obj = v as Record<string, unknown>;
-            const keys = Object.keys(obj).sort();
-            const parts = keys.map((k) => `${JSON.stringify(k)}:${encode(obj[k])}`);
-            return `{${parts.join(',')}}`;
-        }
+    if (t === 'object') {
+      const obj = v as Record<string, unknown>;
+      const keys = Object.keys(obj).sort();
+      const parts = keys.map((k) => `${JSON.stringify(k)}:${encode(obj[k])}`);
+      return `{${parts.join(',')}}`;
+    }
 
-        throw new Error(`canonicalize: unsupported value of type ${t}`);
-    };
+    throw new Error(`canonicalize: unsupported value of type ${t}`);
+  };
 
-    return encode(value);
+  return encode(value);
 };
 
 /**
@@ -71,17 +71,17 @@ export const canonicalize = (value: unknown): string => {
  * canonical JSON of the input fields.
  */
 export const computeIntegrityHash = (input: ScoringIntegrityInput): string => {
-    const canonical = canonicalize({
-        taskId: input.taskId,
-        competition_id: input.competition_id,
-        miner_hotkey: input.miner_hotkey,
-        validator_hotkey: input.validator_hotkey,
-        score: input.score,
-        verdict: input.verdict,
-        timestamp: input.timestamp,
-    });
-    const hex = createHash('sha256').update(canonical, 'utf8').digest('hex');
-    return `sha256:${hex}`;
+  const canonical = canonicalize({
+    taskId: input.taskId,
+    competition_id: input.competition_id,
+    miner_hotkey: input.miner_hotkey,
+    validator_hotkey: input.validator_hotkey,
+    score: input.score,
+    verdict: input.verdict,
+    timestamp: input.timestamp,
+  });
+  const hex = createHash('sha256').update(canonical, 'utf8').digest('hex');
+  return `sha256:${hex}`;
 };
 
 /**
@@ -91,13 +91,13 @@ export const computeIntegrityHash = (input: ScoringIntegrityInput): string => {
  * and can compare it against what the validator reports (GET /competition).
  */
 export interface WeightDecisionInput {
-    competition_id: string | null;
-    /** SS58-normalized leader hotkey; null when burning 100%. */
-    leader_hotkey: string | null;
-    leader_score: number | null;
-    winner_uid: number | null;
-    emissions_percent: number;
-    targets: { uid: number; weight: number }[];
+  competition_id: string | null;
+  /** SS58-normalized leader hotkey; null when burning 100%. */
+  leader_hotkey: string | null;
+  leader_score: number | null;
+  winner_uid: number | null;
+  emissions_percent: number;
+  targets: { uid: number; weight: number }[];
 }
 
 /**
@@ -105,14 +105,14 @@ export interface WeightDecisionInput {
  * JSON of the decision fields.
  */
 export const computeWeightDecisionHash = (input: WeightDecisionInput): string => {
-    const canonical = canonicalize({
-        competition_id: input.competition_id,
-        leader_hotkey: input.leader_hotkey,
-        leader_score: input.leader_score,
-        winner_uid: input.winner_uid,
-        emissions_percent: input.emissions_percent,
-        targets: input.targets.map((t) => ({ uid: t.uid, weight: t.weight })),
-    });
-    const hex = createHash('sha256').update(canonical, 'utf8').digest('hex');
-    return `sha256:${hex}`;
+  const canonical = canonicalize({
+    competition_id: input.competition_id,
+    leader_hotkey: input.leader_hotkey,
+    leader_score: input.leader_score,
+    winner_uid: input.winner_uid,
+    emissions_percent: input.emissions_percent,
+    targets: input.targets.map((t) => ({ uid: t.uid, weight: t.weight })),
+  });
+  const hex = createHash('sha256').update(canonical, 'utf8').digest('hex');
+  return `sha256:${hex}`;
 };

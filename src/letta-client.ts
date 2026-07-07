@@ -45,66 +45,71 @@ export class LettaClient {
 
     // Remove trailing slash
     this.baseUrl = this.baseUrl.replace(/\/$/, '');
-    
+
     // Log the base URL being used for debugging
-    logger.info({ baseUrl: this.baseUrl, envVar: process.env.LETTA_BASE_URL }, 'LettaClient initialized with base URL');
+    logger.info(
+      { baseUrl: this.baseUrl, envVar: process.env.LETTA_BASE_URL },
+      'LettaClient initialized with base URL',
+    );
 
     this.client = axios.create({
       baseURL: this.baseUrl,
       timeout: 120000, // 2 minute timeout for file uploads
       headers: {
-        'Content-Type': 'application/json'
-      }
+        'Content-Type': 'application/json',
+      },
     });
 
     // Add request interceptor for logging
     this.client.interceptors.request.use(
       (config) => {
         // Log at INFO level for folder creation to help debug the empty array issue
-        const isFolderCreation = (config.url === '/v1/folders' || config.url === '/v1/folders/') && config.method === 'post';
+        const isFolderCreation =
+          (config.url === '/v1/folders' || config.url === '/v1/folders/') &&
+          config.method === 'post';
         const logLevel = isFolderCreation ? 'info' : 'debug';
-        logger[logLevel]({ 
-          method: config.method, 
-          url: config.url,
-          fullUrl: `${config.baseURL}${config.url}`,
-          baseURL: config.baseURL,
-          headers: config.headers,
-          data: config.data
-        }, isFolderCreation ? 'Letta folder creation request' : 'Letta API request');
+        logger[logLevel](
+          {
+            method: config.method,
+            url: config.url,
+            fullUrl: `${config.baseURL}${config.url}`,
+            baseURL: config.baseURL,
+            headers: config.headers,
+            data: config.data,
+          },
+          isFolderCreation ? 'Letta folder creation request' : 'Letta API request',
+        );
         return config;
       },
       (error) => {
         logger.error({ error: error.message }, 'Letta request interceptor error');
         return Promise.reject(error);
-      }
+      },
     );
 
     // Add response interceptor for error handling
     this.client.interceptors.response.use(
       (response) => {
-        logger.debug(
-          { status: response.status, url: response.config.url },
-          'Letta API response'
-        );
+        logger.debug({ status: response.status, url: response.config.url }, 'Letta API response');
         return response;
       },
       (error: AxiosError) => {
         const status = error.response?.status;
         const message = error.response?.data || error.message;
         logger.error(
-          { 
-            status, 
+          {
+            status,
             url: error.config?.url,
             method: error.config?.method,
             requestData: error.config?.data,
             responseData: error.response?.data,
             responseHeaders: error.response?.headers,
-            message 
+            message,
           },
-          'Letta API error'
+          'Letta API error',
         );
         return Promise.reject(error);
-      }
+      },
     );
   }
 
@@ -118,22 +123,19 @@ export class LettaClient {
 
     try {
       const params: Record<string, unknown> = {
-        limit: 100
+        limit: 100,
         // Note: API only supports order_by: 'created_at' but created_at is always null, so no ordering
       };
 
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const response = await this.client.get<any[]>('/v1/agents/', { params });
       const agents = response.data || [];
-      logger.debug(
-        { totalAgents: agents.length },
-        'Listed agents'
-      );
+      logger.debug({ totalAgents: agents.length }, 'Listed agents');
       return agents;
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
-        'Failed to list agents'
+        'Failed to list agents',
       );
       throw error;
     }
@@ -150,8 +152,11 @@ export class LettaClient {
       logger.debug({ agentId }, 'Agent deleted successfully');
     } catch (error) {
       logger.error(
-        { error: error instanceof Error ? error.message : String(error), agentId },
-        'Failed to delete agent'
+        {
+          error: error instanceof Error ? error.message : String(error),
+          agentId,
+        },
+        'Failed to delete agent',
       );
       throw error;
     }
@@ -189,7 +194,11 @@ export class LettaClient {
    */
   async createSkill(name: string, description: string, content: string): Promise<string> {
     logger.debug({ name }, 'Creating Letta skill');
-    const response = await this.client.post('/v1/skills/', { name, description, content });
+    const response = await this.client.post('/v1/skills/', {
+      name,
+      description,
+      content,
+    });
     const skillId = response.data?.id;
     if (!skillId) throw new Error('createSkill: no id returned in response');
     logger.debug({ skillId, name }, 'Skill created successfully');
@@ -210,7 +219,9 @@ export class LettaClient {
    */
   async attachToolToAgent(agentId: string, toolName: string): Promise<void> {
     logger.debug({ agentId, toolName }, 'Attaching tool to agent by name');
-    const response = await this.client.get('/v1/tools/', { params: { name: toolName } });
+    const response = await this.client.get('/v1/tools/', {
+      params: { name: toolName },
+    });
     const tools = response.data;
     const tool = Array.isArray(tools) ? tools[0] : null;
     if (!tool?.id) throw new Error(`attachToolToAgent: tool '${toolName}' not found`);
@@ -228,7 +239,10 @@ export class LettaClient {
       logger.debug({ skillId }, 'Skill deleted successfully');
     } catch (error) {
       logger.error(
-        { error: error instanceof Error ? error.message : String(error), skillId },
+        {
+          error: error instanceof Error ? error.message : String(error),
+          skillId,
+        },
         'Failed to delete skill',
       );
       throw error;
@@ -246,24 +260,23 @@ export class LettaClient {
 
     try {
       const params: Record<string, unknown> = {
-        limit: 100
+        limit: 100,
         // Note: API only supports order_by: 'created_at' but created_at is always null, so no ordering
       };
       if (name) {
         params.name = name;
       }
-      
-      const response = await this.client.get<Folder[]>('/v1/folders/', { params });
+
+      const response = await this.client.get<Folder[]>('/v1/folders/', {
+        params,
+      });
       const folders = response.data || [];
-      logger.debug(
-        { totalFolders: folders.length },
-        'Listed folders'
-      );
+      logger.debug({ totalFolders: folders.length }, 'Listed folders');
       return folders;
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
-        'Failed to list folders'
+        'Failed to list folders',
       );
       throw error;
     }
@@ -280,8 +293,11 @@ export class LettaClient {
       logger.debug({ folderId }, 'Folder deleted successfully');
     } catch (error) {
       logger.error(
-        { error: error instanceof Error ? error.message : String(error), folderId },
-        'Failed to delete folder'
+        {
+          error: error instanceof Error ? error.message : String(error),
+          folderId,
+        },
+        'Failed to delete folder',
       );
       throw error;
     }
@@ -290,7 +306,10 @@ export class LettaClient {
   /**
    * Update/rename a folder
    */
-  async updateFolder(folderId: string, updates: { name?: string; description?: string }): Promise<Folder> {
+  async updateFolder(
+    folderId: string,
+    updates: { name?: string; description?: string },
+  ): Promise<Folder> {
     logger.debug({ folderId, updates }, 'Updating Letta folder');
 
     try {
@@ -299,8 +318,11 @@ export class LettaClient {
       return response.data;
     } catch (error) {
       logger.error(
-        { error: error instanceof Error ? error.message : String(error), folderId },
-        'Failed to update folder'
+        {
+          error: error instanceof Error ? error.message : String(error),
+          folderId,
+        },
+        'Failed to update folder',
       );
       throw error;
     }
@@ -330,15 +352,20 @@ export class LettaClient {
         let folders: Folder[];
         try {
           const params: Record<string, unknown> = {
-            limit: 100
+            limit: 100,
             // Note: Not using order/order_by since created_at is always null
           };
-          const response = await this.client.get<Folder[]>('/v1/folders/', { params });
+          const response = await this.client.get<Folder[]>('/v1/folders/', {
+            params,
+          });
           folders = response.data || [];
         } catch (error) {
           logger.warn(
-            { error: error instanceof Error ? error.message : String(error), iteration },
-            'Failed to fetch folders in cleanup iteration'
+            {
+              error: error instanceof Error ? error.message : String(error),
+              iteration,
+            },
+            'Failed to fetch folders in cleanup iteration',
           );
           break; // Stop if we can't fetch folders
         }
@@ -380,13 +407,20 @@ export class LettaClient {
         }
 
         if (foldersToDelete.length === 0) {
-          logger.debug({ iteration, totalDeleted }, 'No more orphaned folders found, cleanup complete');
+          logger.debug(
+            { iteration, totalDeleted },
+            'No more orphaned folders found, cleanup complete',
+          );
           break;
         }
 
         logger.debug(
-          { iteration, count: foldersToDelete.length, folders: foldersToDelete.map(f => f.name) },
-          'Found orphaned folders with hash suffixes to delete'
+          {
+            iteration,
+            count: foldersToDelete.length,
+            folders: foldersToDelete.map((f) => f.name),
+          },
+          'Found orphaned folders with hash suffixes to delete',
         );
 
         // Delete the folders
@@ -395,38 +429,55 @@ export class LettaClient {
           if (folder.id) {
             try {
               await this.deleteFolder(folder.id);
-              logger.debug({ folderId: folder.id, name: folder.name, iteration }, 'Deleted orphaned folder');
+              logger.debug(
+                { folderId: folder.id, name: folder.name, iteration },
+                'Deleted orphaned folder',
+              );
               deletedThisIteration++;
               totalDeleted++;
             } catch (error) {
               logger.warn(
-                { error: error instanceof Error ? error.message : String(error), folderId: folder.id },
-                'Failed to delete orphaned folder (non-fatal)'
+                {
+                  error: error instanceof Error ? error.message : String(error),
+                  folderId: folder.id,
+                },
+                'Failed to delete orphaned folder (non-fatal)',
               );
             }
           }
         }
 
         logger.debug(
-          { iteration, deletedThisIteration, totalDeleted, remainingInBatch: folders.length - foldersToDelete.length },
-          'Completed cleanup iteration'
+          {
+            iteration,
+            deletedThisIteration,
+            totalDeleted,
+            remainingInBatch: folders.length - foldersToDelete.length,
+          },
+          'Completed cleanup iteration',
         );
 
         // If we deleted fewer than we found, or if there are no more folders to process, we're done
         if (deletedThisIteration === 0 || folders.length < 100) {
-          logger.debug({ iteration, totalDeleted }, 'Cleanup complete (no more folders to delete or reached end)');
+          logger.debug(
+            { iteration, totalDeleted },
+            'Cleanup complete (no more folders to delete or reached end)',
+          );
           break;
         }
 
         // Small delay between iterations to avoid overwhelming the API
-        await new Promise(resolve => setTimeout(resolve, 500));
+        await new Promise((resolve) => setTimeout(resolve, 500));
       }
 
-      logger.debug({ totalIterations: iteration, totalDeleted }, 'Finished cleanup of orphaned folders');
+      logger.debug(
+        { totalIterations: iteration, totalDeleted },
+        'Finished cleanup of orphaned folders',
+      );
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
-        'Failed to cleanup orphaned folders'
+        'Failed to cleanup orphaned folders',
       );
       // Don't throw - this is a cleanup operation
     }
@@ -445,59 +496,79 @@ export class LettaClient {
       let exactMatch: Folder | undefined;
       try {
         const foldersByName = await this.listFolders(name);
-        exactMatch = foldersByName.find(f => f.name === name);
+        exactMatch = foldersByName.find((f) => f.name === name);
         if (exactMatch) {
-          logger.debug({ folderId: exactMatch.id, name: exactMatch.name }, 'Found exact match folder by name query');
+          logger.debug(
+            { folderId: exactMatch.id, name: exactMatch.name },
+            'Found exact match folder by name query',
+          );
         }
       } catch (error) {
         logger.debug(
           { error: error instanceof Error ? error.message : String(error) },
-          'Name-based folder query failed, will search all folders'
+          'Name-based folder query failed, will search all folders',
         );
       }
 
       // If not found by name query, search all folders
       if (!exactMatch) {
         const folders = await this.listFolders();
-        exactMatch = folders.find(f => f.name === name);
+        exactMatch = folders.find((f) => f.name === name);
       }
-      
+
       if (exactMatch) {
         if (!exactMatch.id) {
           throw new Error(`Existing folder missing id: ${JSON.stringify(exactMatch)}`);
         }
-        logger.debug({ folderId: exactMatch.id, name: exactMatch.name }, 'Found exact match folder');
-        
+        logger.debug(
+          { folderId: exactMatch.id, name: exactMatch.name },
+          'Found exact match folder',
+        );
+
         // Clean up any old folders with hash suffixes (they shouldn't exist, but just in case)
         // Get all folders to find hash-suffixed ones
         const allFolders = await this.listFolders();
-        const oldFolders = allFolders.filter(f => f.name.startsWith(name + '_') && f.id !== exactMatch.id);
+        const oldFolders = allFolders.filter(
+          (f) => f.name.startsWith(name + '_') && f.id !== exactMatch.id,
+        );
         if (oldFolders.length > 0) {
-          logger.debug({ count: oldFolders.length }, 'Found old folders with hash suffixes, cleaning up');
+          logger.debug(
+            { count: oldFolders.length },
+            'Found old folders with hash suffixes, cleaning up',
+          );
           for (const oldFolder of oldFolders) {
             if (oldFolder.id) {
               try {
                 await this.deleteFolder(oldFolder.id);
-                logger.debug({ folderId: oldFolder.id, name: oldFolder.name }, 'Deleted old folder');
+                logger.debug(
+                  { folderId: oldFolder.id, name: oldFolder.name },
+                  'Deleted old folder',
+                );
               } catch (error) {
                 logger.warn(
-                  { error: error instanceof Error ? error.message : String(error), folderId: oldFolder.id },
-                  'Failed to delete old folder (non-fatal)'
+                  {
+                    error: error instanceof Error ? error.message : String(error),
+                    folderId: oldFolder.id,
+                  },
+                  'Failed to delete old folder (non-fatal)',
                 );
               }
             }
           }
         }
-        
+
         return exactMatch;
       }
 
       // No exact match found - check for old folders with hash suffixes
       const allFolders = await this.listFolders();
-      const oldFolders = allFolders.filter(f => f.name.startsWith(name + '_'));
-      
+      const oldFolders = allFolders.filter((f) => f.name.startsWith(name + '_'));
+
       if (oldFolders.length > 0) {
-        logger.debug({ count: oldFolders.length }, 'Found old folders with hash suffixes, cleaning up before creating exact match');
+        logger.debug(
+          { count: oldFolders.length },
+          'Found old folders with hash suffixes, cleaning up before creating exact match',
+        );
         // Delete all old folders
         for (const oldFolder of oldFolders) {
           if (oldFolder.id) {
@@ -506,39 +577,46 @@ export class LettaClient {
               logger.debug({ folderId: oldFolder.id, name: oldFolder.name }, 'Deleted old folder');
             } catch (error) {
               logger.warn(
-                { error: error instanceof Error ? error.message : String(error), folderId: oldFolder.id },
-                'Failed to delete old folder (non-fatal)'
+                {
+                  error: error instanceof Error ? error.message : String(error),
+                  folderId: oldFolder.id,
+                },
+                'Failed to delete old folder (non-fatal)',
               );
             }
           }
         }
-        
+
         // Wait a moment after deletion to ensure Letta has processed the deletions
         // This helps prevent duplicate name conflicts that might cause hash suffixes
-        await new Promise(resolve => setTimeout(resolve, 1000));
+        await new Promise((resolve) => setTimeout(resolve, 1000));
       }
 
       // Create new folder with exact name (per API docs, should create with exact name)
       logger.debug({ name }, 'Creating new folder with exact name');
       const newFolder = await this.createFolder(name, description);
-      
+
       if (!newFolder || !newFolder.id) {
         throw new Error(`Created folder missing id: ${JSON.stringify(newFolder)}`);
       }
-      
+
       // If Letta added a hash suffix, log a warning
       if (newFolder.name !== name) {
         logger.warn(
-          { requestedName: name, actualName: newFolder.name, folderId: newFolder.id },
-          'Folder created with different name than requested (Letta may have added hash suffix)'
+          {
+            requestedName: name,
+            actualName: newFolder.name,
+            folderId: newFolder.id,
+          },
+          'Folder created with different name than requested (Letta may have added hash suffix)',
         );
       }
-      
+
       return newFolder;
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
-        'Failed to find or create folder'
+        'Failed to find or create folder',
       );
       throw error;
     }
@@ -554,12 +632,12 @@ export class LettaClient {
       const requestPayload = {
         name,
         description,
-        embedding: 'openai/text-embedding-3-small' // Default embedding
+        embedding: 'openai/text-embedding-3-small', // Default embedding
       };
       // Use trailing slash to avoid 307 redirects
       const folderUrl = '/v1/folders/';
       logger.debug({ requestPayload, url: folderUrl }, 'Folder creation request');
-      
+
       // Try to catch any response transformation issues
       let response;
       try {
@@ -578,10 +656,10 @@ export class LettaClient {
               url: axErr.config?.url,
               method: axErr.config?.method,
               data: axErr.config?.data,
-              headers: axErr.config?.headers
-            }
+              headers: axErr.config?.headers,
+            },
           },
-          'Folder creation request failed'
+          'Folder creation request failed',
         );
         throw error;
       }
@@ -590,7 +668,7 @@ export class LettaClient {
       // Also check the raw response if data is empty array
       const rawResponse = response.data;
       logger.info(
-        { 
+        {
           responseData: rawResponse,
           responseDataString: JSON.stringify(rawResponse),
           responseStatus: response.status,
@@ -603,51 +681,57 @@ export class LettaClient {
             url: response.config?.url,
             method: response.config?.method,
             headers: response.config?.headers,
-            data: response.config?.data
-          }
-        }, 
-        'Folder creation response'
+            data: response.config?.data,
+          },
+        },
+        'Folder creation response',
       );
-      
+
       // If we got an empty array, this is unexpected - log a warning
       if (Array.isArray(rawResponse) && rawResponse.length === 0) {
         logger.warn(
           {
             status: response.status,
             headers: response.headers,
-            requestPayload
+            requestPayload,
           },
-          'Folder creation returned empty array - this may indicate an authentication or server-side error'
+          'Folder creation returned empty array - this may indicate an authentication or server-side error',
         );
       }
-      
+
       // Handle case where API returns an array instead of a single object
       let folderData: Folder | null = null;
       if (Array.isArray(response.data)) {
         logger.warn(
           { arrayLength: response.data.length, requestedName: name },
-          'Folder creation API returned array instead of single object'
+          'Folder creation API returned array instead of single object',
         );
-        
+
         if (response.data.length === 0) {
           // Empty array - folder might still have been created, query for it
           logger.info(
             { requestedName: name },
-            'Folder creation API returned empty array, querying API to verify folder was created'
+            'Folder creation API returned empty array, querying API to verify folder was created',
           );
-          
+
           // Wait a moment for the folder to be created
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+
           // Query folders by name to find the one we just created
           const folders = await this.listFolders(name);
-          const foundFolder = folders.find(f => f.name === name) || folders.find(f => f.name.startsWith(name + '_'));
-          
+          const foundFolder =
+            folders.find((f) => f.name === name) ||
+            folders.find((f) => f.name.startsWith(name + '_'));
+
           if (foundFolder) {
             folderData = foundFolder;
             logger.info(
-              { folderId: foundFolder.id, name: foundFolder.name, requestedName: name },
-              'Found created folder by querying API after empty array response'
+              {
+                folderId: foundFolder.id,
+                name: foundFolder.name,
+                requestedName: name,
+              },
+              'Found created folder by querying API after empty array response',
             );
           } else {
             // Still not found - this is an error
@@ -658,71 +742,86 @@ export class LettaClient {
             // 3. Server-side exception being caught and returning empty array
             throw new Error(
               `Failed to create folder '${name}'. ` +
-              `API returned empty array (status ${response.status}), which indicates a server-side error. ` +
-              `Possible causes: embedding model 'openai/text-embedding-3-small' not available, ` +
-              `authentication issue, or server misconfiguration. ` +
-              `Please check Letta server logs for details.`
+                `API returned empty array (status ${response.status}), which indicates a server-side error. ` +
+                `Possible causes: embedding model 'openai/text-embedding-3-small' not available, ` +
+                `authentication issue, or server misconfiguration. ` +
+                `Please check Letta server logs for details.`,
             );
           }
         } else {
           // Array with items - try to find the folder we just created
-          folderData = response.data.find(f => f.name === name) || null;
+          folderData = response.data.find((f) => f.name === name) || null;
           if (!folderData) {
-            folderData = response.data.find(f => f.name.startsWith(name + '_')) || null;
+            folderData = response.data.find((f) => f.name.startsWith(name + '_')) || null;
           }
         }
       } else {
         folderData = response.data;
       }
-      
+
       // If we couldn't find the folder in the response, query the API again to find it
       if (!folderData || folderData.name !== name) {
         logger.info(
           { requestedName: name, foundInResponse: !!folderData },
-          'Folder not found in creation response, querying API to find it'
+          'Folder not found in creation response, querying API to find it',
         );
-        
+
         // Wait a moment for the folder to be created
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+
         // Query folders by name to find the one we just created
         const folders = await this.listFolders(name);
-        const foundFolder = folders.find(f => f.name === name) || folders.find(f => f.name.startsWith(name + '_'));
-        
+        const foundFolder =
+          folders.find((f) => f.name === name) ||
+          folders.find((f) => f.name.startsWith(name + '_'));
+
         if (foundFolder) {
           folderData = foundFolder;
           logger.info(
-            { folderId: foundFolder.id, name: foundFolder.name, requestedName: name },
-            'Found created folder by querying API'
+            {
+              folderId: foundFolder.id,
+              name: foundFolder.name,
+              requestedName: name,
+            },
+            'Found created folder by querying API',
           );
         } else {
           // Still not found - this is an error
           throw new Error(
             `Failed to find created folder '${name}' after creation. ` +
-            `API returned ${Array.isArray(response.data) ? 'array' : 'object'} but folder not found.`
+              `API returned ${Array.isArray(response.data) ? 'array' : 'object'} but folder not found.`,
           );
         }
       }
-      
+
       if (!folderData || !folderData.id) {
-        logger.error({ responseData: response.data, folderData }, 'Folder creation response missing id field');
-        throw new Error(`Folder creation response missing id field: ${JSON.stringify(response.data)}`);
+        logger.error(
+          { responseData: response.data, folderData },
+          'Folder creation response missing id field',
+        );
+        throw new Error(
+          `Folder creation response missing id field: ${JSON.stringify(response.data)}`,
+        );
       }
 
       // If the folder name doesn't match what we requested, try to rename it
       if (folderData.name !== name) {
         logger.warn(
-          { requestedName: name, actualName: folderData.name, folderId: folderData.id },
-          'Folder created with different name than requested, attempting to rename'
+          {
+            requestedName: name,
+            actualName: folderData.name,
+            folderId: folderData.id,
+          },
+          'Folder created with different name than requested, attempting to rename',
         );
-        
+
         try {
           // Try to rename the folder to the exact name we want
           const oldName = folderData.name;
           folderData = await this.updateFolder(folderData.id, { name });
           logger.info(
             { folderId: folderData.id, oldName, newName: folderData.name },
-            'Successfully renamed folder to exact name'
+            'Successfully renamed folder to exact name',
           );
         } catch (error) {
           // If rename fails with 409 (conflict), it means the exact name folder already exists
@@ -730,58 +829,79 @@ export class LettaClient {
           if (error instanceof AxiosError && error.response?.status === 409) {
             logger.info(
               { requestedName: name, error: error.message },
-              'Rename failed with 409 conflict - exact name folder likely exists, searching for it'
+              'Rename failed with 409 conflict - exact name folder likely exists, searching for it',
             );
-            
+
             try {
               // Query specifically for the exact name
               const exactMatchFolders = await this.listFolders(name);
-              const exactMatch = exactMatchFolders.find(f => f.name === name);
-              
+              const exactMatch = exactMatchFolders.find((f) => f.name === name);
+
               if (exactMatch && exactMatch.id) {
                 logger.info(
-                  { folderId: exactMatch.id, name: exactMatch.name, requestedName: name },
-                  'Found existing exact match folder, using it instead'
+                  {
+                    folderId: exactMatch.id,
+                    name: exactMatch.name,
+                    requestedName: name,
+                  },
+                  'Found existing exact match folder, using it instead',
                 );
                 // Delete the folder we just created (with hash suffix)
                 try {
                   await this.deleteFolder(folderData.id);
-                  logger.debug({ folderId: folderData.id, name: folderData.name }, 'Deleted duplicate folder with hash suffix');
+                  logger.debug(
+                    { folderId: folderData.id, name: folderData.name },
+                    'Deleted duplicate folder with hash suffix',
+                  );
                 } catch (deleteError) {
                   logger.warn(
-                    { error: deleteError instanceof Error ? deleteError.message : String(deleteError), folderId: folderData.id },
-                    'Failed to delete duplicate folder (non-fatal)'
+                    {
+                      error:
+                        deleteError instanceof Error ? deleteError.message : String(deleteError),
+                      folderId: folderData.id,
+                    },
+                    'Failed to delete duplicate folder (non-fatal)',
                   );
                 }
                 return exactMatch;
               } else {
                 logger.warn(
                   { requestedName: name },
-                  'Rename failed with 409 but exact match folder not found in search'
+                  'Rename failed with 409 but exact match folder not found in search',
                 );
               }
             } catch (searchError) {
               logger.warn(
-                { error: searchError instanceof Error ? searchError.message : String(searchError), requestedName: name },
-                'Failed to search for exact match folder after rename conflict'
+                {
+                  error: searchError instanceof Error ? searchError.message : String(searchError),
+                  requestedName: name,
+                },
+                'Failed to search for exact match folder after rename conflict',
               );
             }
           }
-          
+
           logger.warn(
-            { error: error instanceof Error ? error.message : String(error), folderId: folderData.id, requestedName: name },
-            'Failed to rename folder (non-fatal, continuing with hash-suffixed name)'
+            {
+              error: error instanceof Error ? error.message : String(error),
+              folderId: folderData.id,
+              requestedName: name,
+            },
+            'Failed to rename folder (non-fatal, continuing with hash-suffixed name)',
           );
           // Continue with the hash-suffixed name if rename fails
         }
       }
 
-      logger.debug({ folderId: folderData.id, name: folderData.name, requestedName: name }, 'Folder created successfully');
+      logger.debug(
+        { folderId: folderData.id, name: folderData.name, requestedName: name },
+        'Folder created successfully',
+      );
       return folderData;
     } catch (error) {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
-        'Failed to create folder'
+        'Failed to create folder',
       );
       throw error;
     }
@@ -795,13 +915,16 @@ export class LettaClient {
 
     try {
       const response = await this.client.get<FileMetadata[]>(`/v1/folders/${folderId}/files`, {
-        params: { limit: 1000 } // Get all files
+        params: { limit: 1000 }, // Get all files
       });
       return response.data;
     } catch (error) {
       logger.error(
-        { error: error instanceof Error ? error.message : String(error), folderId },
-        'Failed to list files in folder'
+        {
+          error: error instanceof Error ? error.message : String(error),
+          folderId,
+        },
+        'Failed to list files in folder',
       );
       throw error;
     }
@@ -830,20 +953,23 @@ export class LettaClient {
     folderId: string,
     filePath: string,
     fileName?: string,
-    duplicateHandling: 'replace' | 'skip' | 'suffix' | 'error' = 'replace'
+    duplicateHandling: 'replace' | 'skip' | 'suffix' | 'error' = 'replace',
   ): Promise<FileMetadata> {
     const actualFileName = fileName || path.basename(filePath);
-    logger.debug({ folderId, filePath, fileName: actualFileName, duplicateHandling }, 'Uploading file to folder');
+    logger.debug(
+      { folderId, filePath, fileName: actualFileName, duplicateHandling },
+      'Uploading file to folder',
+    );
 
     try {
       // Read file
       const fileBuffer = await fs.readFile(filePath);
-      
+
       // Create form data
       const formData = new FormData();
       formData.append('file', fileBuffer, {
         filename: actualFileName,
-        contentType: this.getContentType(actualFileName)
+        contentType: this.getContentType(actualFileName),
       });
 
       // Make request with form data
@@ -852,25 +978,29 @@ export class LettaClient {
         formData,
         {
           params: {
-            duplicate_handling: duplicateHandling
+            duplicate_handling: duplicateHandling,
           },
           headers: {
-            ...formData.getHeaders()
+            ...formData.getHeaders(),
           },
           maxContentLength: Infinity,
-          maxBodyLength: Infinity
-        }
+          maxBodyLength: Infinity,
+        },
       );
 
       logger.info(
         { fileId: response.data.id, fileName: actualFileName, folderId },
-        'File uploaded successfully'
+        'File uploaded successfully',
       );
       return response.data;
     } catch (error) {
       logger.error(
-        { error: error instanceof Error ? error.message : String(error), filePath, folderId },
-        'Failed to upload file'
+        {
+          error: error instanceof Error ? error.message : String(error),
+          filePath,
+          folderId,
+        },
+        'Failed to upload file',
       );
       throw error;
     }
@@ -882,60 +1012,80 @@ export class LettaClient {
   async uploadFileIfChanged(
     folderId: string,
     filePath: string,
-    fileName?: string
-  ): Promise<{ uploaded: boolean; fileMetadata?: FileMetadata; reason: string }> {
+    fileName?: string,
+  ): Promise<{
+    uploaded: boolean;
+    fileMetadata?: FileMetadata;
+    reason: string;
+  }> {
     const actualFileName = fileName || path.basename(filePath);
-    
+
     try {
       // Get local file info
       const localSize = await this.getFileSize(filePath);
-      
+
       // List existing files in folder
       const existingFiles = await this.listFilesInFolder(folderId);
-      const existingFile = existingFiles.find(f => f.name === actualFileName);
-      
+      const existingFile = existingFiles.find((f) => f.name === actualFileName);
+
       if (existingFile) {
         // File exists - check if size changed
         if (existingFile.size && existingFile.size === localSize) {
           logger.info(
             { fileName: actualFileName, folderId, size: localSize },
-            'File exists with same size, skipping upload'
+            'File exists with same size, skipping upload',
           );
           return {
             uploaded: false,
             fileMetadata: existingFile,
-            reason: 'File exists with same size'
+            reason: 'File exists with same size',
           };
         } else {
           // Size changed or no size info - replace it
           logger.info(
-            { fileName: actualFileName, folderId, existingSize: existingFile.size, newSize: localSize },
-            'File exists but size changed, replacing'
+            {
+              fileName: actualFileName,
+              folderId,
+              existingSize: existingFile.size,
+              newSize: localSize,
+            },
+            'File exists but size changed, replacing',
           );
-          const fileMetadata = await this.uploadFileToFolder(folderId, filePath, actualFileName, 'replace');
+          const fileMetadata = await this.uploadFileToFolder(
+            folderId,
+            filePath,
+            actualFileName,
+            'replace',
+          );
           return {
             uploaded: true,
             fileMetadata,
-            reason: 'File replaced due to size change'
+            reason: 'File replaced due to size change',
           };
         }
       } else {
         // File doesn't exist - upload it
-        logger.info(
-          { fileName: actualFileName, folderId },
-          'File does not exist, uploading'
+        logger.info({ fileName: actualFileName, folderId }, 'File does not exist, uploading');
+        const fileMetadata = await this.uploadFileToFolder(
+          folderId,
+          filePath,
+          actualFileName,
+          'replace',
         );
-          const fileMetadata = await this.uploadFileToFolder(folderId, filePath, actualFileName, 'replace');
         return {
           uploaded: true,
           fileMetadata,
-          reason: 'New file uploaded'
+          reason: 'New file uploaded',
         };
       }
     } catch (error) {
       logger.error(
-        { error: error instanceof Error ? error.message : String(error), filePath, folderId },
-        'Failed to check and upload file'
+        {
+          error: error instanceof Error ? error.message : String(error),
+          filePath,
+          folderId,
+        },
+        'Failed to check and upload file',
       );
       throw error;
     }
@@ -958,7 +1108,7 @@ export class LettaClient {
       '.jpeg': 'image/jpeg',
       '.gif': 'image/gif',
       '.html': 'text/html',
-      '.xml': 'application/xml'
+      '.xml': 'application/xml',
     };
     return contentTypes[ext] || 'application/octet-stream';
   }

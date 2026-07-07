@@ -47,7 +47,13 @@ test('computeIntegrityHash changes when any field changes', () => {
   assert.notEqual(base, computeIntegrityHash({ ...baseInput, score: 0.88 }));
   assert.notEqual(base, computeIntegrityHash({ ...baseInput, verdict: 'failed' }));
   assert.notEqual(base, computeIntegrityHash({ ...baseInput, miner_hotkey: '5Fother' }));
-  assert.notEqual(base, computeIntegrityHash({ ...baseInput, timestamp: '2026-07-06T00:00:01.000Z' }));
+  assert.notEqual(
+    base,
+    computeIntegrityHash({
+      ...baseInput,
+      timestamp: '2026-07-06T00:00:01.000Z',
+    }),
+  );
 });
 
 const baseDecision: WeightDecisionInput = {
@@ -64,7 +70,10 @@ const baseDecision: WeightDecisionInput = {
 
 test('computeWeightDecisionHash is stable and sha256-prefixed', () => {
   const h1 = computeWeightDecisionHash(baseDecision);
-  const h2 = computeWeightDecisionHash({ ...baseDecision, targets: [...baseDecision.targets] });
+  const h2 = computeWeightDecisionHash({
+    ...baseDecision,
+    targets: [...baseDecision.targets],
+  });
   assert.equal(h1, h2);
   assert.match(h1, /^sha256:[0-9a-f]{64}$/);
 });
@@ -78,7 +87,10 @@ test('computeWeightDecisionHash changes when any field changes', () => {
     base,
     computeWeightDecisionHash({
       ...baseDecision,
-      targets: [{ uid: 42, weight: 0.3 }, { uid: 0, weight: 0.7 }],
+      targets: [
+        { uid: 42, weight: 0.3 },
+        { uid: 0, weight: 0.7 },
+      ],
     }),
   );
 });

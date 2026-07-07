@@ -27,17 +27,17 @@ export const DEFAULT_EMISSIONS_PERCENT = 0.2;
  * 80% is burned. Invalid / unset values fall back to the default.
  */
 export const getEmissionsPercent = (): number => {
-    const raw = process.env.EMISSIONS_PERCENT;
-    if (raw === undefined || raw.trim() === '') {
-        return DEFAULT_EMISSIONS_PERCENT;
-    }
+  const raw = process.env.EMISSIONS_PERCENT;
+  if (raw === undefined || raw.trim() === '') {
+    return DEFAULT_EMISSIONS_PERCENT;
+  }
 
-    const parsed = Number(raw);
-    if (!Number.isFinite(parsed)) {
-        return DEFAULT_EMISSIONS_PERCENT;
-    }
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_EMISSIONS_PERCENT;
+  }
 
-    return Math.min(1, Math.max(0, parsed));
+  return Math.min(1, Math.max(0, parsed));
 };
 
 /**
@@ -51,24 +51,24 @@ export const getEmissionsPercent = (): number => {
  * conversion (SCALE_FACTOR=10000) needs no re-normalization.
  */
 export const computeBurnWeights = (
-    winnerUid: number | null | undefined,
-    emissionsPercent: number = getEmissionsPercent()
+  winnerUid: number | null | undefined,
+  emissionsPercent: number = getEmissionsPercent(),
 ): BittensorWeightTarget[] => {
-    const p = Math.min(1, Math.max(0, emissionsPercent));
+  const p = Math.min(1, Math.max(0, emissionsPercent));
 
-    // No eligible winner, the winner IS the burn UID, or a zero emissions share:
-    // burn everything (don't emit a pointless zero-weight winner entry).
-    if (winnerUid === null || winnerUid === undefined || winnerUid === BURN_UID || p <= 0) {
-        return [{ uid: BURN_UID, weight: 1 }];
-    }
+  // No eligible winner, the winner IS the burn UID, or a zero emissions share:
+  // burn everything (don't emit a pointless zero-weight winner entry).
+  if (winnerUid === null || winnerUid === undefined || winnerUid === BURN_UID || p <= 0) {
+    return [{ uid: BURN_UID, weight: 1 }];
+  }
 
-    // Degenerate but valid: 100% emissions leaves nothing to burn.
-    if (p >= 1) {
-        return [{ uid: winnerUid, weight: 1 }];
-    }
+  // Degenerate but valid: 100% emissions leaves nothing to burn.
+  if (p >= 1) {
+    return [{ uid: winnerUid, weight: 1 }];
+  }
 
-    return [
-        { uid: winnerUid, weight: p },
-        { uid: BURN_UID, weight: 1 - p },
-    ];
+  return [
+    { uid: winnerUid, weight: p },
+    { uid: BURN_UID, weight: 1 - p },
+  ];
 };

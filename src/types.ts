@@ -77,4 +77,3 @@ export interface ResultResponse {
   status: string;
   message: string;
 }
-
