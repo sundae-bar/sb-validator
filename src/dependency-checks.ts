@@ -16,12 +16,12 @@ const CHECK_TIMEOUT_MS = Number(process.env.DEPENDENCY_CHECK_TIMEOUT_MS || '3000
 const CACHE_TTL_MS = Number(process.env.DEPENDENCY_CHECK_CACHE_SECONDS || '15') * 1000;
 
 export type DependencyState =
-  | 'ok'           // reachable and healthy
-  | 'degraded'     // reachable but misconfigured (e.g. missing API key)
+  | 'ok' // reachable and healthy
+  | 'degraded' // reachable but misconfigured (e.g. missing API key)
   | 'unauthorized' // reachable but rejected our credentials
-  | 'unreachable'  // connection failed (container down / wrong URL / network)
-  | 'error'        // reachable but returned an unexpected error
-  | 'disabled';    // optional dependency, not configured
+  | 'unreachable' // connection failed (container down / wrong URL / network)
+  | 'error' // reachable but returned an unexpected error
+  | 'disabled'; // optional dependency, not configured
 
 export interface DependencyCheck {
   name: string;
@@ -68,7 +68,11 @@ async function probe(url: string, headers: Record<string, string> = {}): Promise
     const latencyMs = Date.now() - started;
 
     if (response.status >= 200 && response.status < 300) {
-      return { status: 'ok', latencyMs, message: `healthy (HTTP ${response.status})` };
+      return {
+        status: 'ok',
+        latencyMs,
+        message: `healthy (HTTP ${response.status})`,
+      };
     }
     if (response.status === 401 || response.status === 403) {
       return {
@@ -102,7 +106,8 @@ async function checkSbEvals(): Promise<DependencyCheck> {
 
   const check: DependencyCheck = {
     name: 'sbevals',
-    description: 'Skill evaluation service (sundaebarai/sn121-skill-evals). Required to evaluate skill (.md) challenges.',
+    description:
+      'Skill evaluation service (sundaebarai/sn121-skill-evals). Required to evaluate skill (.md) challenges.',
     required: true,
     url: baseUrl,
     ...result,
@@ -110,12 +115,16 @@ async function checkSbEvals(): Promise<DependencyCheck> {
 
   if (check.status === 'ok' && !apiKey) {
     check.status = 'degraded';
-    check.message = 'reachable, but SBEVALS_API_KEY is not set — skill task submissions will be rejected';
-    check.hint = 'Set SBEVALS_API_KEY in .env (compose passes the same value to the sidecar as EVAL_SERVICE_API_KEY).';
+    check.message =
+      'reachable, but SBEVALS_API_KEY is not set — skill task submissions will be rejected';
+    check.hint =
+      'Set SBEVALS_API_KEY in .env (compose passes the same value to the sidecar as EVAL_SERVICE_API_KEY).';
   } else if (check.status === 'unauthorized') {
-    check.hint = 'SBEVALS_API_KEY must equal the sidecar\'s EVAL_SERVICE_API_KEY. Check for a stale .env or an override.';
+    check.hint =
+      "SBEVALS_API_KEY must equal the sidecar's EVAL_SERVICE_API_KEY. Check for a stale .env or an override.";
   } else if (check.status === 'unreachable') {
-    check.hint = 'Is the sbevals container running? Check `docker compose ps` and `docker compose logs -f sbevals`. In compose the URL should be http://sbevals:8090.';
+    check.hint =
+      'Is the sbevals container running? Check `docker compose ps` and `docker compose logs -f sbevals`. In compose the URL should be http://sbevals:8090.';
   }
 
   return check;
@@ -127,7 +136,8 @@ async function checkCoordinator(apiUrl: string): Promise<DependencyCheck> {
 
   const check: DependencyCheck = {
     name: 'coordinator',
-    description: 'Sundae Bar coordinator API (task polling, heartbeats, result submission, weights).',
+    description:
+      'Sundae Bar coordinator API (task polling, heartbeats, result submission, weights).',
     required: true,
     url: baseUrl,
     ...result,
@@ -160,7 +170,10 @@ async function checkLetta(): Promise<DependencyCheck> {
     };
   }
 
-  const baseUrl = rawUrl.trim().replace(/^["']|["']$/g, '').replace(/\/$/, '');
+  const baseUrl = rawUrl
+    .trim()
+    .replace(/^["']|["']$/g, '')
+    .replace(/\/$/, '');
   const result = await probe(`${baseUrl}/v1/health`);
 
   const check: DependencyCheck = {
@@ -172,7 +185,8 @@ async function checkLetta(): Promise<DependencyCheck> {
   };
 
   if (check.status === 'unreachable') {
-    check.hint = 'Optional dependency. Check `docker compose logs -f letta-server` if the legacy agent track is needed.';
+    check.hint =
+      'Optional dependency. Check `docker compose logs -f letta-server` if the legacy agent track is needed.';
   }
 
   return check;
@@ -218,7 +232,10 @@ export async function checkDependencies(apiUrl: string): Promise<DependencyRepor
       logger.warn(
         {
           sbevals: { status: sbevals.status, message: sbevals.message },
-          coordinator: { status: coordinator.status, message: coordinator.message },
+          coordinator: {
+            status: coordinator.status,
+            message: coordinator.message,
+          },
         },
         'Dependency check reported degraded state',
       );

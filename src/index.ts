@@ -1,6 +1,6 @@
 /**
  * Validator entrypoint
- * 
+ *
  * Secure validator client for Sundae Bar SN121 subnet
  */
 
@@ -36,7 +36,7 @@ function loadConfig(): ValidatorConfig {
       logger.info({ path: process.env.HOTKEY_PATH }, 'Loaded mnemonic from HOTKEY_PATH');
     } catch (error) {
       throw new Error(
-        `Failed to read HOTKEY_PATH (${process.env.HOTKEY_PATH}): ${error instanceof Error ? error.message : String(error)}`
+        `Failed to read HOTKEY_PATH (${process.env.HOTKEY_PATH}): ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
@@ -49,9 +49,9 @@ function loadConfig(): ValidatorConfig {
   if (!mnemonic) {
     throw new Error(
       'No key configured. Set one of:\n' +
-      '  VALIDATOR_MNEMONIC — 12-word BIP39 mnemonic\n' +
-      '  HOTKEY_PATH        — path to Bittensor hotkey JSON file\n' +
-      '  PRIVATE_KEY        — raw private key / hex seed (0x...)'
+        '  VALIDATOR_MNEMONIC — 12-word BIP39 mnemonic\n' +
+        '  HOTKEY_PATH        — path to Bittensor hotkey JSON file\n' +
+        '  PRIVATE_KEY        — raw private key / hex seed (0x...)',
     );
   }
 
@@ -59,7 +59,7 @@ function loadConfig(): ValidatorConfig {
   if (mnemonic.includes('word1 word2 word3')) {
     throw new Error(
       'Please replace the placeholder mnemonic in your .env file.\n' +
-      'Set your Bittensor validator hotkey mnemonic (the same one you use for subnet 121).'
+        'Set your Bittensor validator hotkey mnemonic (the same one you use for subnet 121).',
     );
   }
 
@@ -73,7 +73,7 @@ function loadConfig(): ValidatorConfig {
     weightsInterval: parseInt(process.env.BITTENSOR_WEIGHTS_INTERVAL_MINUTES || '30', 10),
     maxRetries: parseInt(process.env.MAX_RETRIES || '3', 10),
     retryDelay: parseInt(process.env.RETRY_DELAY || '1000', 10),
-    logLevel: process.env.LOG_LEVEL || 'info'
+    logLevel: process.env.LOG_LEVEL || 'info',
   };
 }
 
@@ -84,16 +84,16 @@ async function main(): Promise<void> {
 
     // Load configuration
     const config = loadConfig();
-      logger.info(
+    logger.info(
       {
         apiUrl: config.apiUrl,
         displayName: config.displayName,
         version: config.version,
         pollInterval: config.pollInterval,
         heartbeatInterval: config.heartbeatInterval,
-        weightsInterval: config.weightsInterval
+        weightsInterval: config.weightsInterval,
       },
-      'Configuration loaded'
+      'Configuration loaded',
     );
 
     // LETTA_BASE_URL is optional: skill challenges are evaluated by sb-evals over
@@ -128,7 +128,7 @@ async function main(): Promise<void> {
     process.on('unhandledRejection', (reason, promise) => {
       logger.error(
         { reason: reason instanceof Error ? reason.message : String(reason) },
-        'Unhandled rejection'
+        'Unhandled rejection',
       );
       Promise.all([validator.stop()]).finally(() => process.exit(1));
     });
@@ -139,7 +139,7 @@ async function main(): Promise<void> {
     startServer(serverApp, serverPort).catch((error) => {
       logger.error(
         { error: error instanceof Error ? error.message : String(error) },
-        'Failed to start HTTP server (continuing without it)'
+        'Failed to start HTTP server (continuing without it)',
       );
       // Don't exit - validator can still work without HTTP server
     });
@@ -148,13 +148,16 @@ async function main(): Promise<void> {
     // The start() method contains an infinite loop that only exits when stop() is called
     logger.info('Starting validator (will run continuously until stopped)...');
     await validator.start();
-    
+
     // This line should never be reached unless stop() was called
     logger.info('Validator exited normally');
   } catch (error) {
     logger.error(
-      { error: error instanceof Error ? error.message : String(error), stack: error instanceof Error ? error.stack : undefined },
-      'Fatal error - validator will exit'
+      {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      },
+      'Fatal error - validator will exit',
     );
     process.exit(1);
   }
@@ -170,4 +173,3 @@ if (require.main === module) {
 
 export { Validator };
 export type { ValidatorConfig } from './types';
-

@@ -26,7 +26,7 @@ export async function initializeCrypto(): Promise<void> {
  */
 export async function createKeyPair(mnemonic: string): Promise<KeyringPair> {
   await initializeCrypto();
-  
+
   if (!mnemonic || mnemonic.trim().length === 0) {
     throw new Error('Mnemonic or private key is required and cannot be empty');
   }
@@ -35,7 +35,7 @@ export async function createKeyPair(mnemonic: string): Promise<KeyringPair> {
     const keyring = new Keyring({ type: 'sr25519' });
     const trimmed = mnemonic.trim();
     const pair = trimmed.startsWith('0x')
-      ? keyring.addFromUri(trimmed)       // raw hex seed / private key
+      ? keyring.addFromUri(trimmed) // raw hex seed / private key
       : keyring.addFromMnemonic(trimmed); // BIP39 mnemonic
     return pair;
   } catch (error) {
@@ -46,7 +46,7 @@ export async function createKeyPair(mnemonic: string): Promise<KeyringPair> {
     if (errorMessage.includes('Invalid bip39 mnemonic')) {
       throw new Error(
         `Invalid mnemonic: ${errorMessage}\n` +
-        `Please use your valid Bittensor validator hotkey mnemonic (12-word BIP39 phrase).`
+          `Please use your valid Bittensor validator hotkey mnemonic (12-word BIP39 phrase).`,
       );
     }
 
@@ -81,7 +81,10 @@ export function signPayload(pair: KeyringPair, payload: object | string): string
  */
 export function signRequest(pair: KeyringPair, payload: object): string {
   // Remove signature fields if present
-  const { signature: _signature, signed_payload: _signed_payload, ...cleanPayload } = payload as Record<string, unknown>;
+  const {
+    signature: _signature,
+    signed_payload: _signed_payload,
+    ...cleanPayload
+  } = payload as Record<string, unknown>;
   return signPayload(pair, cleanPayload);
 }
-
