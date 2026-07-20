@@ -4,6 +4,19 @@
 
 Secure validator client for the sundae_bar **SN121** subnet. This validator polls for evaluation tasks, routes each task to the correct evaluator, processes it, and submits results back to the coordinator.
 
+## Weight setting (local, not central)
+
+This validator **sets on-chain weights itself**. It does **not** ask the coordinator for a precomputed weight vector.
+
+Previously the flow was central: the validator called `POST /weights` and submitted whatever the API returned. That path is gone. Today:
+
+1. Pull the active competition + leaderboard from the coordinator (`GET /api/v2/validators/competitions/active`) — **read-only data**, not a weight verdict.
+2. Select the current #1 miner by score in-validator (`leaderboard.ts`).
+3. Build the weight vector in-validator (`weight-policy.ts`): `EMISSIONS_PERCENT` to the leader's UID, remainder to UID 0.
+4. Submit via `setWeights` on subnet 121.
+
+The coordinator is a competition/task/result store. Emissions decisions live in this repo. See [Bittensor Weights Configuration](#bittensor-weights-configuration) and [`docs/coordinator-api-prd.md`](docs/coordinator-api-prd.md).
+
 ## How challenges are evaluated
 
 The validator evaluates **skill challenges (`.md`)** by routing them to the in-house **`sbevals`** evaluator over HTTP. This is the active track and the only one you need to set up. `sbevals` runs the skill: it executes a test agent loaded with the submitted `SKILL.md` (making LLM calls to produce outputs) and then scores those outputs with LLM-as-judge graders.
@@ -16,7 +29,7 @@ Routing is automatic. If a task carries a `skill_file_path` (a `SKILL.md`), the 
 
 - ✅ **Secure Authentication**: Hotkey-based signature authentication
 - ✅ **Skill Evaluation**: Routes skill (`.md`) submissions to the `sbevals` evaluator and submits scores
-- ✅ **Bittensor Integration**: Computes weights **locally** from public competition data (current #1 miner takes `EMISSIONS_PERCENT`, remainder burned to UID 0) and submits them to subnet 121 — no central weight server
+- ✅ **Local weight setting**: Decides and submits SN121 weights on-chain from public competition data (current #1 miner takes `EMISSIONS_PERCENT`, remainder to UID 0). Does **not** use a central weight-setting API.
 - ✅ **Robust Error Handling**: Comprehensive retry logic with exponential backoff
 - ✅ **Health Monitoring**: Automatic heartbeats and HTTP health endpoints
 - ✅ **Production Ready**: Dockerized, non-root user, health checks
@@ -292,8 +305,8 @@ graders:
 3. **Heartbeat**:
    - Sends periodic heartbeats to maintain online status
    - Allows the coordinator to track validator availability
-4. **Bittensor Weights (decided locally, not fetched)**:
-   - The validator **decides weights itself** — it no longer asks the coordinator which weights to set.
+4. **Bittensor Weights (local decision + on-chain setWeights)**:
+   - The validator **sets weights itself**. It does **not** call a central weight-setting endpoint.
    - Each cycle it pulls the active competition + leaderboard from the coordinator (read-only **data**), deterministically selects the current **#1 miner by score**, resolves that miner's hotkey → metagraph UID, and sets weights: **`EMISSIONS_PERCENT` (default 20%) to the leader, the remaining ~80% burned to UID 0**.
    - Recomputed on the periodic interval **and** immediately whenever a newly scored submission changes the standings.
    - Over a competition's lifetime, whoever holds #1 the longest collects the most emissions — "time at the top takes all" emerges from continuously paying the current leader.
@@ -307,9 +320,10 @@ graders:
 
 ### Bittensor Weights Configuration
 
-The validator **computes weights locally** from public competition data — the weight decision
-lives in the validator, not on a central server. This is the core of the subnet's
-decentralization: the coordinator is a **data source**, not the arbiter of emissions.
+Weights are **set by this validator**, not by a central service. The coordinator
+supplies competition leaderboard data only; this process selects the winner, builds
+the weight vector, and calls `setWeights`. There is no `POST /weights` fetch cycle
+anymore — that central weight-setting path has been removed from the validator.
 
 | Variable | Required | Description |
 | --- | --- | --- |
