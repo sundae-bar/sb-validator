@@ -13,6 +13,10 @@ import {
   submitSn121Weights,
   resolveUids,
   normalizeToSs58,
+  fetchWeightsSetRateLimitBlocks,
+  classifySubmitError,
+  BLOCK_TIME_MS,
+  DEFAULT_WEIGHTS_RATE_LIMIT_BLOCKS,
   type BittensorWeightTarget,
 } from './weights';
 import { selectCurrentLeader, type LeaderboardEntry } from './leaderboard';
@@ -26,7 +30,7 @@ import { computeWeightDecisionHash } from './integrity';
  */
 export interface WeightDecisionSnapshot {
   at: string;
-  reason: 'interval' | 'event' | 'startup';
+  reason: 'interval' | 'event' | 'startup' | 'deferred';
   competition: {
     competition_id: string;
     window_start: string;
@@ -40,6 +44,10 @@ export interface WeightDecisionSnapshot {
   decisionHash: string | null;
   submitted: boolean;
   error: string | null;
+  /** Set when the cycle intentionally made no chain call. */
+  skipped?: 'unchanged' | 'rate-limited' | null;
+  /** When a gated or failed submit will be retried by a deferred cycle. */
+  nextAttemptAt?: string | null;
 }
 
 export class Validator {
@@ -55,6 +63,14 @@ export class Validator {
   // that arrives mid-cycle is coalesced into exactly one trailing re-run.
   private weightUpdateRunning: boolean = false;
   private weightUpdatePending: boolean = false;
+  // The chain accepts one setWeights per hotkey per weightsSetRateLimit blocks
+  // (anchored on the last ACCEPTED one) — gate locally with +1 block margin.
+  private weightsRateLimitMs: number =
+    (DEFAULT_WEIGHTS_RATE_LIMIT_BLOCKS + 1) * BLOCK_TIME_MS;
+  private lastSuccessfulSubmitAtMs: number | null = null;
+  private lastSubmittedTargetsKey: string | null = null;
+  private weightsCooldownUntilMs: number = 0;
+  private deferredWeightTimer: NodeJS.Timeout | null = null;
   // Observability for GET /competition: what the validator last voted with,
   // when it last landed on-chain, and when the next interval tick fires.
   private lastWeightDecision: WeightDecisionSnapshot | null = null;
@@ -119,6 +135,24 @@ export class Validator {
       this.taskProcessor.setOnScored(() => {
         void this.runWeightCycle('event');
       });
+
+      // Load the chain's setWeights rate limit once; the submit gate uses it.
+      try {
+        const blocks = await fetchWeightsSetRateLimitBlocks();
+        this.weightsRateLimitMs = (blocks + 1) * BLOCK_TIME_MS;
+        logger.info(
+          { blocks, gateMs: this.weightsRateLimitMs },
+          'Loaded weightsSetRateLimit from chain',
+        );
+      } catch (error) {
+        logger.warn(
+          {
+            error: error instanceof Error ? error.message : String(error),
+            fallbackBlocks: DEFAULT_WEIGHTS_RATE_LIMIT_BLOCKS,
+          },
+          'Could not read weightsSetRateLimit from chain; using fallback',
+        );
+      }
 
       // Register evaluator
       const registration = await this.apiClient.register(
@@ -206,7 +240,9 @@ export class Validator {
    * trigger is coalesced into a single trailing re-run so two setWeights calls
    * never race.
    */
-  private async runWeightCycle(reason: 'interval' | 'event' | 'startup'): Promise<void> {
+  private async runWeightCycle(
+    reason: 'interval' | 'event' | 'startup' | 'deferred',
+  ): Promise<void> {
     if (!this.apiClient || !this.running) {
       return;
     }
@@ -294,33 +330,77 @@ export class Validator {
           } else if (!this.config.mnemonic) {
             logger.warn({ reason }, 'No key configured; skipping on-chain setWeights');
           } else {
-            const submitStart = Date.now();
-            try {
-              await submitSn121Weights(targets, {
-                validatorSecret: this.config.mnemonic,
-              });
-              snapshot.submitted = true;
-              this.lastSetAt = new Date().toISOString();
+            const targetsKey = JSON.stringify(targets);
+            const now = Date.now();
+            const gateUntil = Math.max(
+              this.lastSuccessfulSubmitAtMs === null
+                ? 0
+                : this.lastSuccessfulSubmitAtMs + this.weightsRateLimitMs,
+              this.weightsCooldownUntilMs,
+            );
+
+            if (reason === 'event' && targetsKey === this.lastSubmittedTargetsKey) {
+              // Already on-chain; only event cycles skip — interval/deferred
+              // still submit unchanged targets to keep the tempo heartbeat.
+              snapshot.skipped = 'unchanged';
               logger.info(
-                {
-                  reason,
-                  submissionTimeMs: Date.now() - submitStart,
-                  totalCycleTimeMs: Date.now() - cycleStart,
-                  targets,
-                },
-                'Successfully submitted weights on-chain',
+                { reason, decisionHash },
+                'Weights unchanged since last accepted submit — skipping chain call',
               );
-            } catch (submitError) {
-              snapshot.error =
-                submitError instanceof Error ? submitError.message : String(submitError);
-              logger.error(
-                {
-                  reason,
-                  error: snapshot.error,
-                  errorStack: submitError instanceof Error ? submitError.stack : undefined,
-                },
-                'Failed to submit weights on-chain via setWeights',
+            } else if (now < gateUntil) {
+              // The chain would reject this inside the rate-limit window —
+              // defer one fresh cycle to window-open instead.
+              snapshot.skipped = 'rate-limited';
+              snapshot.nextAttemptAt = new Date(gateUntil).toISOString();
+              this.scheduleDeferredWeightCycle(gateUntil - now);
+              logger.info(
+                { reason, retryAt: snapshot.nextAttemptAt, targets },
+                'Inside setWeights rate-limit window — deferred until it opens',
               );
+            } else {
+              const submitStart = Date.now();
+              try {
+                await submitSn121Weights(targets, {
+                  validatorSecret: this.config.mnemonic,
+                });
+                snapshot.submitted = true;
+                this.lastSetAt = new Date().toISOString();
+                this.lastSuccessfulSubmitAtMs = Date.now();
+                this.lastSubmittedTargetsKey = targetsKey;
+                this.weightsCooldownUntilMs = 0;
+                // A pending deferred retry would just recompute what landed.
+                this.clearDeferredWeightTimer();
+                logger.info(
+                  {
+                    reason,
+                    submissionTimeMs: Date.now() - submitStart,
+                    totalCycleTimeMs: Date.now() - cycleStart,
+                    targets,
+                  },
+                  'Successfully submitted weights on-chain',
+                );
+              } catch (submitError) {
+                snapshot.error =
+                  submitError instanceof Error ? submitError.message : String(submitError);
+                const errorKind = classifySubmitError(submitError);
+                if (errorKind !== 'other') {
+                  // "Too soon" means our anchor is stale (e.g. pre-restart
+                  // submit) — back off a full window, then retry fresh.
+                  this.weightsCooldownUntilMs = Date.now() + this.weightsRateLimitMs;
+                  snapshot.nextAttemptAt = new Date(this.weightsCooldownUntilMs).toISOString();
+                  this.scheduleDeferredWeightCycle(this.weightsRateLimitMs);
+                }
+                logger.error(
+                  {
+                    reason,
+                    errorKind,
+                    retryAt: snapshot.nextAttemptAt ?? null,
+                    error: snapshot.error,
+                    errorStack: submitError instanceof Error ? submitError.stack : undefined,
+                  },
+                  'Failed to submit weights on-chain via setWeights',
+                );
+              }
             }
           }
         } catch (error) {
@@ -350,6 +430,26 @@ export class Validator {
       } while (this.weightUpdatePending && this.running);
     } finally {
       this.weightUpdateRunning = false;
+    }
+  }
+
+  /** Schedule exactly one deferred cycle at window-open; it recomputes fresh targets. */
+  private scheduleDeferredWeightCycle(delayMs: number): void {
+    if (this.deferredWeightTimer || !this.running) {
+      return;
+    }
+    const delay = Math.max(delayMs, 1_000);
+    this.deferredWeightTimer = setTimeout(() => {
+      this.deferredWeightTimer = null;
+      void this.runWeightCycle('deferred');
+    }, delay);
+    this.deferredWeightTimer.unref();
+  }
+
+  private clearDeferredWeightTimer(): void {
+    if (this.deferredWeightTimer) {
+      clearTimeout(this.deferredWeightTimer);
+      this.deferredWeightTimer = null;
     }
   }
 
@@ -384,6 +484,7 @@ export class Validator {
    * Stop weights loop
    */
   private stopWeights(): void {
+    this.clearDeferredWeightTimer();
     if (this.weightsInterval) {
       clearInterval(this.weightsInterval);
       this.weightsInterval = null;
