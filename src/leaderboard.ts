@@ -28,12 +28,13 @@ export interface ActiveCompetition {
 /**
  * Deterministically select the current #1 miner.
  *
- * Ranking: highest `best_score` wins. Ties are broken by earliest
- * `submitted_at` (first to reach the score leads), then by `miner_hotkey`
- * lexicographic order as a final deterministic fallback.
+ * Only entries with a positive `best_score` are eligible. Ranking: highest
+ * `best_score` wins. Ties are broken by earliest `submitted_at` (first to
+ * reach the score leads), then by `miner_hotkey` lexicographic order as a
+ * final deterministic fallback.
  *
- * Returns null when there is no competition or no scored entries — the caller
- * burns 100% in that case.
+ * Returns null when there is no competition or no positively-scored entries —
+ * the caller burns 100% in that case.
  */
 export const selectCurrentLeader = (
   comp: ActiveCompetition | null | undefined,
@@ -43,7 +44,11 @@ export const selectCurrentLeader = (
   }
 
   const eligible = comp.entries.filter(
-    (e) => e && typeof e.best_score === 'number' && Number.isFinite(e.best_score),
+    (e) =>
+      e &&
+      typeof e.best_score === 'number' &&
+      Number.isFinite(e.best_score) &&
+      e.best_score > 0,
   );
   if (eligible.length === 0) {
     return null;
