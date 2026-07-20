@@ -140,6 +140,8 @@ export function createServer(validator: Validator): Express {
         lastDecisionAt: d?.at ?? null,
         lastDecisionReason: d?.reason ?? null,
         submitted: d?.submitted ?? false,
+        skipped: d?.skipped ?? null,
+        nextAttemptAt: d?.nextAttemptAt ?? null,
         error: d?.error ?? null,
         lastSetAt: w.lastSetAt,
         nextSetAt: w.nextSetAt,

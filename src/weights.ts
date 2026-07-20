@@ -81,6 +81,12 @@ const DEFAULT_NETUID_121 = 121;
 const DEFAULT_VERSION_KEY = 0;
 const DEFAULT_SS58_FORMAT = 42;
 
+/** Average Bittensor block time; converts block-denominated limits to wall time. */
+export const BLOCK_TIME_MS = 12_000;
+
+/** Fallback when the chain read fails; matches SN121's current on-chain value. */
+export const DEFAULT_WEIGHTS_RATE_LIMIT_BLOCKS = 100;
+
 /**
  * Create a Polkadot API client wired with the `subnetInfoRuntimeApi.getMetagraph`
  * runtime definition. Shared by weight submission (validator-permit check) and
@@ -211,6 +217,52 @@ export const resolveUids = async (
       );
     }
   }
+};
+
+/**
+ * Read the subnet's `weightsSetRateLimit`: the minimum blocks the chain
+ * requires between accepted setWeights extrinsics from one hotkey.
+ */
+export const fetchWeightsSetRateLimitBlocks = async (cfg?: {
+  wsEndpoint?: string;
+  netuid?: number;
+}): Promise<number> => {
+  const wsEndpoint = cfg?.wsEndpoint?.trim() || DEFAULT_WS_ENDPOINT;
+  const netuid = cfg?.netuid ?? DEFAULT_NETUID_121;
+
+  const api = await createSubnetApi(wsEndpoint);
+  try {
+    const raw = await api.query.subtensorModule.weightsSetRateLimit(netuid);
+    const blocks = Number(raw.toString());
+    if (!Number.isFinite(blocks) || blocks < 0) {
+      throw new Error(`Unexpected weightsSetRateLimit value: ${raw.toString()}`);
+    }
+    logger.debug({ netuid, blocks }, 'sn121: read weightsSetRateLimit from chain');
+    return blocks;
+  } finally {
+    try {
+      await api.disconnect();
+    } catch (err) {
+      logger.warn(
+        { err, errorMessage: err instanceof Error ? err.message : String(err) },
+        'sn121: error disconnecting api after weightsSetRateLimit read',
+      );
+    }
+  }
+};
+
+/**
+ * Classify a setWeights error: inside the rate-limit window the chain rejects
+ * with `1010 … Custom error: 6`; rapid repeats escalate to a txpool
+ * `1012 … temporarily banned`.
+ */
+export type SubmitErrorKind = 'rate-limited' | 'temporarily-banned' | 'other';
+
+export const classifySubmitError = (error: unknown): SubmitErrorKind => {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/1012|temporarily banned/i.test(message)) return 'temporarily-banned';
+  if (/custom error:\s*6/i.test(message)) return 'rate-limited';
+  return 'other';
 };
 
 /**
