@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import { Validator } from './validator';
 import logger from './logger';
 import { createServer, startServer } from './server';
+import { initMonitoring, captureError, flushMonitoring } from './monitoring';
 import type { ValidatorConfig } from './types';
 
 /**
@@ -96,6 +97,8 @@ async function main(): Promise<void> {
       'Configuration loaded',
     );
 
+    initMonitoring(config.version);
+
     // LETTA_BASE_URL is optional: skill challenges are evaluated by sb-evals over
     // HTTP and never touch Letta. It is only needed for the dormant legacy agent
     // (.af) track; when unset, that track is simply unavailable (skill-only mode).
@@ -113,6 +116,7 @@ async function main(): Promise<void> {
     const shutdown = async (signal: string) => {
       logger.info({ signal }, 'Received shutdown signal');
       await validator.stop();
+      await flushMonitoring();
       process.exit(0);
     };
 
@@ -122,15 +126,21 @@ async function main(): Promise<void> {
     // Handle uncaught errors
     process.on('uncaughtException', (error) => {
       logger.error({ error: error.message, stack: error.stack }, 'Uncaught exception');
-      Promise.all([validator.stop()]).finally(() => process.exit(1));
+      captureError(error, { stage: 'uncaught-exception' });
+      void flushMonitoring().finally(() => {
+        Promise.all([validator.stop()]).finally(() => process.exit(1));
+      });
     });
 
-    process.on('unhandledRejection', (reason, promise) => {
+    process.on('unhandledRejection', (reason) => {
       logger.error(
         { reason: reason instanceof Error ? reason.message : String(reason) },
         'Unhandled rejection',
       );
-      Promise.all([validator.stop()]).finally(() => process.exit(1));
+      captureError(reason, { stage: 'unhandled-rejection' });
+      void flushMonitoring().finally(() => {
+        Promise.all([validator.stop()]).finally(() => process.exit(1));
+      });
     });
 
     // Start HTTP server for health checks (runs in background)

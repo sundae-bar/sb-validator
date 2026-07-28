@@ -22,6 +22,7 @@ import {
 import { selectCurrentLeader, type LeaderboardEntry } from './leaderboard';
 import { computeBurnWeights, getEmissionsPercent, BURN_UID } from './weight-policy';
 import { computeWeightDecisionHash } from './integrity';
+import { captureError, captureAlert, checkInWeightsMonitor } from './monitoring';
 
 /**
  * Snapshot of the most recent weight decision, exposed via GET /competition so
@@ -406,6 +407,7 @@ export class Validator {
                   },
                   'Successfully submitted weights on-chain',
                 );
+                checkInWeightsMonitor(this.config.weightsInterval || 30);
               } catch (submitError) {
                 snapshot.error =
                   submitError instanceof Error ? submitError.message : String(submitError);
@@ -427,6 +429,7 @@ export class Validator {
                   },
                   'Failed to submit weights on-chain via setWeights',
                 );
+                captureError(submitError, { stage: 'set-weights', reason, errorKind });
               }
             }
           }
@@ -455,6 +458,7 @@ export class Validator {
             },
             'Weight cycle failed (will retry on next interval/event)',
           );
+          captureError(error, { stage: 'weight-cycle', reason });
         }
       } while (this.weightUpdatePending && this.running && epoch === this.weightCycleEpoch);
     } finally {
@@ -508,6 +512,10 @@ export class Validator {
       { runningForMs, thresholdMs: WEIGHT_CYCLE_WATCHDOG_MS },
       'Weight cycle exceeded the watchdog threshold — abandoning it and starting fresh',
     );
+    captureAlert('Weight cycle exceeded the watchdog threshold; abandoned and restarted', {
+      stage: 'weight-cycle-watchdog',
+      runningForMs: String(runningForMs),
+    });
     this.weightCycleEpoch += 1;
     this.weightUpdateRunning = false;
     this.weightUpdatePending = false;
@@ -703,6 +711,7 @@ export class Validator {
             },
             `Multiple consecutive errors (${consecutiveErrors}), but continuing to poll...`,
           );
+          captureError(error, { stage: 'task-poll', consecutiveErrors: String(consecutiveErrors) });
           // Reset counter to avoid log spam, but keep going
           consecutiveErrors = 0;
         } else {
