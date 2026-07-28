@@ -145,6 +145,7 @@ export function createServer(validator: Validator): Express {
         error: d?.error ?? null,
         lastSetAt: w.lastSetAt,
         nextSetAt: w.nextSetAt,
+        cycleStartedAt: w.cycleStartedAt,
       },
       ...(d ? {} : { note: 'No weight cycle has completed yet — check again shortly.' }),
       timestamp: new Date().toISOString(),

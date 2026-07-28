@@ -1,6 +1,6 @@
 {
   "name": "sundae-bar-validator",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "description": "Secure validator client for sundae_bar SN121 subnet",
   "main": "dist/index.js",
   "scripts": {
@@ -31,6 +31,7 @@
     "@polkadot/keyring": "14.0.1",
     "@polkadot/util": "14.0.1",
     "@polkadot/util-crypto": "14.0.1",
+    "@sentry/node": "^10.68.0",
     "@types/js-yaml": "^4.0.9",
     "axios": "^1.13.2",
     "dotenv": "^17.2.3",
