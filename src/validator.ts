@@ -13,7 +13,7 @@ import {
   submitSn121Weights,
   resolveUids,
   normalizeToSs58,
-  fetchWeightsSetRateLimitBlocks,
+  fetchWeightsChainState,
   classifySubmitError,
   BLOCK_TIME_MS,
   DEFAULT_WEIGHTS_RATE_LIMIT_BLOCKS,
@@ -30,7 +30,7 @@ import { computeWeightDecisionHash } from './integrity';
  */
 export interface WeightDecisionSnapshot {
   at: string;
-  reason: 'interval' | 'event' | 'startup' | 'deferred';
+  reason: 'interval' | 'event' | 'startup' | 'deferred' | 'watchdog';
   competition: {
     competition_id: string;
     window_start: string;
@@ -50,6 +50,10 @@ export interface WeightDecisionSnapshot {
   nextAttemptAt?: string | null;
 }
 
+// Every chain op is deadlined far below this — a cycle running longer has a wedged await.
+const WEIGHT_CYCLE_WATCHDOG_MS = 15 * 60_000;
+const WATCHDOG_CHECK_INTERVAL_MS = 60_000;
+
 export class Validator {
   private config: ValidatorConfig;
   private apiClient: ApiClient | null = null;
@@ -65,12 +69,15 @@ export class Validator {
   private weightUpdatePending: boolean = false;
   // The chain accepts one setWeights per hotkey per weightsSetRateLimit blocks
   // (anchored on the last ACCEPTED one) — gate locally with +1 block margin.
-  private weightsRateLimitMs: number =
-    (DEFAULT_WEIGHTS_RATE_LIMIT_BLOCKS + 1) * BLOCK_TIME_MS;
+  private weightsRateLimitMs: number = (DEFAULT_WEIGHTS_RATE_LIMIT_BLOCKS + 1) * BLOCK_TIME_MS;
   private lastSuccessfulSubmitAtMs: number | null = null;
   private lastSubmittedTargetsKey: string | null = null;
   private weightsCooldownUntilMs: number = 0;
   private deferredWeightTimer: NodeJS.Timeout | null = null;
+  // Watchdog state: when the in-flight cycle started, plus an epoch to orphan abandoned cycles.
+  private weightCycleStartedAtMs: number | null = null;
+  private weightCycleEpoch: number = 0;
+  private weightsWatchdogInterval: NodeJS.Timeout | null = null;
   // Observability for GET /competition: what the validator last voted with,
   // when it last landed on-chain, and when the next interval tick fires.
   private lastWeightDecision: WeightDecisionSnapshot | null = null;
@@ -136,12 +143,21 @@ export class Validator {
         void this.runWeightCycle('event');
       });
 
-      // Load the chain's setWeights rate limit once; the submit gate uses it.
+      // Rebuild rate limit + gate anchor from chain — the in-memory anchor dies on restart.
       try {
-        const blocks = await fetchWeightsSetRateLimitBlocks();
-        this.weightsRateLimitMs = (blocks + 1) * BLOCK_TIME_MS;
+        const chainState = await fetchWeightsChainState({ hotkey: this.hotkey });
+        this.weightsRateLimitMs = (chainState.rateLimitBlocks + 1) * BLOCK_TIME_MS;
+        if (chainState.blocksSinceLastUpdate !== null) {
+          this.lastSuccessfulSubmitAtMs =
+            Date.now() - chainState.blocksSinceLastUpdate * BLOCK_TIME_MS;
+        }
         logger.info(
-          { blocks, gateMs: this.weightsRateLimitMs },
+          {
+            blocks: chainState.rateLimitBlocks,
+            gateMs: this.weightsRateLimitMs,
+            uid: chainState.uid,
+            blocksSinceLastUpdate: chainState.blocksSinceLastUpdate,
+          },
           'Loaded weightsSetRateLimit from chain',
         );
       } catch (error) {
@@ -240,9 +256,7 @@ export class Validator {
    * trigger is coalesced into a single trailing re-run so two setWeights calls
    * never race.
    */
-  private async runWeightCycle(
-    reason: 'interval' | 'event' | 'startup' | 'deferred',
-  ): Promise<void> {
+  private async runWeightCycle(reason: WeightDecisionSnapshot['reason']): Promise<void> {
     if (!this.apiClient || !this.running) {
       return;
     }
@@ -254,14 +268,20 @@ export class Validator {
     }
 
     this.weightUpdateRunning = true;
+    const epoch = this.weightCycleEpoch;
     try {
       do {
         this.weightUpdatePending = false;
+        // Per-iteration clock: coalesced re-runs each get a fresh watchdog window.
+        this.weightCycleStartedAtMs = Date.now();
         const cycleStart = Date.now();
         logger.info({ reason, hotkey: this.hotkey }, 'Starting weight cycle');
 
         try {
           const comp = await this.apiClient.fetchActiveCompetition();
+          if (this.cycleAbandoned(epoch, reason)) {
+            break;
+          }
           const leader = selectCurrentLeader(comp);
 
           let leaderSs58: string | null = null;
@@ -302,6 +322,9 @@ export class Validator {
             submitted: false,
             error: null,
           };
+          if (this.cycleAbandoned(epoch, reason)) {
+            break;
+          }
           this.lastWeightDecision = snapshot;
 
           logger.info(
@@ -367,6 +390,10 @@ export class Validator {
                 this.lastSetAt = new Date().toISOString();
                 this.lastSuccessfulSubmitAtMs = Date.now();
                 this.lastSubmittedTargetsKey = targetsKey;
+                if (this.cycleAbandoned(epoch, reason)) {
+                  // Keep the on-chain facts above; pacing belongs to the replacement cycle.
+                  break;
+                }
                 this.weightsCooldownUntilMs = 0;
                 // A pending deferred retry would just recompute what landed.
                 this.clearDeferredWeightTimer();
@@ -383,7 +410,7 @@ export class Validator {
                 snapshot.error =
                   submitError instanceof Error ? submitError.message : String(submitError);
                 const errorKind = classifySubmitError(submitError);
-                if (errorKind !== 'other') {
+                if (errorKind !== 'other' && epoch === this.weightCycleEpoch) {
                   // "Too soon" means our anchor is stale (e.g. pre-restart
                   // submit) — back off a full window, then retry fresh.
                   this.weightsCooldownUntilMs = Date.now() + this.weightsRateLimitMs;
@@ -406,18 +433,20 @@ export class Validator {
         } catch (error) {
           // Fetch/resolve failed before a decision could be computed — record
           // the failure so GET /competition shows why there's no fresh vote.
-          this.lastWeightDecision = {
-            at: new Date().toISOString(),
-            reason,
-            competition: null,
-            leader: null,
-            winnerUid: null,
-            emissionsPercent: getEmissionsPercent(),
-            targets: null,
-            decisionHash: null,
-            submitted: false,
-            error: error instanceof Error ? error.message : String(error),
-          };
+          if (epoch === this.weightCycleEpoch) {
+            this.lastWeightDecision = {
+              at: new Date().toISOString(),
+              reason,
+              competition: null,
+              leader: null,
+              winnerUid: null,
+              emissionsPercent: getEmissionsPercent(),
+              targets: null,
+              decisionHash: null,
+              submitted: false,
+              error: error instanceof Error ? error.message : String(error),
+            };
+          }
           logger.error(
             {
               reason,
@@ -427,9 +456,13 @@ export class Validator {
             'Weight cycle failed (will retry on next interval/event)',
           );
         }
-      } while (this.weightUpdatePending && this.running);
+      } while (this.weightUpdatePending && this.running && epoch === this.weightCycleEpoch);
     } finally {
-      this.weightUpdateRunning = false;
+      // An abandoned cycle (epoch advanced by the watchdog) must not clobber its replacement.
+      if (epoch === this.weightCycleEpoch) {
+        this.weightUpdateRunning = false;
+        this.weightCycleStartedAtMs = null;
+      }
     }
   }
 
@@ -451,6 +484,35 @@ export class Validator {
       clearTimeout(this.deferredWeightTimer);
       this.deferredWeightTimer = null;
     }
+  }
+
+  /** True when the watchdog abandoned this cycle; the caller must stop without touching shared state. */
+  private cycleAbandoned(epoch: number, reason: WeightDecisionSnapshot['reason']): boolean {
+    if (epoch === this.weightCycleEpoch) {
+      return false;
+    }
+    logger.info({ reason }, 'Weight cycle was abandoned by the watchdog; stopping this run');
+    return true;
+  }
+
+  /** Abandon a cycle stuck on an await that will never settle, and run a fresh one. */
+  private checkWeightCycleWatchdog(): void {
+    if (!this.weightUpdateRunning || this.weightCycleStartedAtMs === null) {
+      return;
+    }
+    const runningForMs = Date.now() - this.weightCycleStartedAtMs;
+    if (runningForMs < WEIGHT_CYCLE_WATCHDOG_MS) {
+      return;
+    }
+    logger.error(
+      { runningForMs, thresholdMs: WEIGHT_CYCLE_WATCHDOG_MS },
+      'Weight cycle exceeded the watchdog threshold — abandoning it and starting fresh',
+    );
+    this.weightCycleEpoch += 1;
+    this.weightUpdateRunning = false;
+    this.weightUpdatePending = false;
+    this.weightCycleStartedAtMs = null;
+    void this.runWeightCycle('watchdog');
   }
 
   /**
@@ -477,6 +539,14 @@ export class Validator {
       void this.runWeightCycle('interval');
     }, interval);
 
+    if (this.weightsWatchdogInterval) {
+      clearInterval(this.weightsWatchdogInterval);
+    }
+    this.weightsWatchdogInterval = setInterval(
+      () => this.checkWeightCycleWatchdog(),
+      WATCHDOG_CHECK_INTERVAL_MS,
+    );
+
     logger.info({ intervalMinutes }, 'Weight loop started (local decision)');
   }
 
@@ -485,6 +555,10 @@ export class Validator {
    */
   private stopWeights(): void {
     this.clearDeferredWeightTimer();
+    if (this.weightsWatchdogInterval) {
+      clearInterval(this.weightsWatchdogInterval);
+      this.weightsWatchdogInterval = null;
+    }
     if (this.weightsInterval) {
       clearInterval(this.weightsInterval);
       this.weightsInterval = null;
@@ -505,6 +579,7 @@ export class Validator {
     lastDecision: WeightDecisionSnapshot | null;
     lastSetAt: string | null;
     nextSetAt: string | null;
+    cycleStartedAt: string | null;
   } {
     return {
       enabled: process.env.BITTENSOR_WEIGHTS_DISABLED !== 'true',
@@ -513,6 +588,9 @@ export class Validator {
       lastDecision: this.lastWeightDecision,
       lastSetAt: this.lastSetAt,
       nextSetAt: this.nextSetAt,
+      cycleStartedAt: this.weightCycleStartedAtMs
+        ? new Date(this.weightCycleStartedAtMs).toISOString()
+        : null,
     };
   }
 
