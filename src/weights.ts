@@ -33,10 +33,11 @@ export interface BittensorWeightTarget {
 // The rest has reasonable defaults but can be overridden if needed.
 export interface Sn121SubmitConfig {
   /**
-   * WebSocket endpoint for the Bittensor (Finney) network.
+   * WebSocket endpoint(s) for the Bittensor (Finney) network — a single URL or
+   * a comma-separated failover list, tried in order.
    * Example: 'wss://entrypoint-finney.opentensor.ai:443'
    *
-   * If omitted, a sensible default is used.
+   * If omitted, BITTENSOR_WS_ENDPOINTS (same format) or a sensible default is used.
    */
   wsEndpoint?: string;
 
@@ -76,7 +77,7 @@ export interface Sn121SubmitConfig {
 }
 
 // Reasonable defaults so you can call submitSn121Weights() with minimal config.
-const DEFAULT_WS_ENDPOINT = 'wss://entrypoint-finney.opentensor.ai:443';
+const DEFAULT_WS_ENDPOINTS = ['wss://entrypoint-finney.opentensor.ai:443'];
 const DEFAULT_NETUID_121 = 121;
 const DEFAULT_VERSION_KEY = 0;
 const DEFAULT_SS58_FORMAT = 42;
@@ -87,39 +88,116 @@ export const BLOCK_TIME_MS = 12_000;
 /** Fallback when the chain read fails; matches SN121's current on-chain value. */
 export const DEFAULT_WEIGHTS_RATE_LIMIT_BLOCKS = 100;
 
+// Deadlines for chain ops: a bad RPC backend must fail the call (callers retry), never hang it.
+export const CHAIN_CONNECT_TIMEOUT_MS = 30_000;
+export const CHAIN_READ_TIMEOUT_MS = 30_000;
+export const CHAIN_SUBMIT_TIMEOUT_MS = 180_000;
+export const CHAIN_DISCONNECT_TIMEOUT_MS = 10_000;
+
+/** Message off an unknown error; provider failures reject with ErrorEvent, not Error. */
+const errorMessage = (error: unknown): string =>
+  error instanceof Error
+    ? error.message
+    : ((error as { message?: string } | null)?.message ?? String(error));
+
+/** Endpoints to try in order: explicit override, BITTENSOR_WS_ENDPOINTS (comma-separated), or the default. */
+export const resolveWsEndpoints = (override?: string): string[] => {
+  const raw = override ?? process.env.BITTENSOR_WS_ENDPOINTS ?? '';
+  const list = raw
+    .split(',')
+    .map((endpoint) => endpoint.trim())
+    .filter(Boolean);
+  return list.length > 0 ? list : [...DEFAULT_WS_ENDPOINTS];
+};
+
+/** Race a promise against a deadline; a settlement arriving after the deadline is swallowed. */
+export const withDeadline = async <T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string,
+): Promise<T> => {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          void promise.catch(() => undefined);
+          reject(new Error(`sn121: timed out after ${ms}ms: ${label}`));
+        }, ms);
+      }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+};
+
 /**
- * Create a Polkadot API client wired with the `subnetInfoRuntimeApi.getMetagraph`
- * runtime definition. Shared by weight submission (validator-permit check) and
- * miner UID resolution so the runtime config lives in exactly one place.
+ * Connect to the first responsive chain endpoint, wired with the
+ * `subnetInfoRuntimeApi.getMetagraph` runtime definition. Shared by weight
+ * submission (validator-permit check) and miner UID resolution so the runtime
+ * config lives in exactly one place.
  *
  * The caller owns the returned `api` and must `disconnect()` it.
  */
-const createSubnetApi = async (wsEndpoint: string): Promise<ApiPromise> => {
+const connectSubnetApi = async (wsEndpoints: readonly string[]): Promise<ApiPromise> => {
   await cryptoWaitReady();
-  const provider = new WsProvider(wsEndpoint);
-  return ApiPromise.create({
-    provider,
-    noInitWarn: true,
-    runtime: {
-      subnetInfoRuntimeApi: [
-        {
-          methods: {
-            getMetagraph: {
-              description: 'Get registered validators and miners for a subnet',
-              params: [
-                {
-                  name: 'netuid',
-                  type: 'u16',
+  let lastError: unknown = new Error('sn121: no chain endpoints configured');
+  for (const wsEndpoint of wsEndpoints) {
+    let provider: WsProvider | undefined;
+    try {
+      provider = new WsProvider(wsEndpoint);
+      // throwOnConnect + deadline: a failed init must reject, not leave isReady pending forever.
+      return await withDeadline(
+        ApiPromise.create({
+          provider,
+          throwOnConnect: true,
+          noInitWarn: true,
+          runtime: {
+            subnetInfoRuntimeApi: [
+              {
+                methods: {
+                  getMetagraph: {
+                    description: 'Get registered validators and miners for a subnet',
+                    params: [
+                      {
+                        name: 'netuid',
+                        type: 'u16',
+                      },
+                    ],
+                    type: 'Json',
+                  },
                 },
-              ],
-              type: 'Json',
-            },
+                version: 1,
+              },
+            ],
           },
-          version: 1,
-        },
-      ],
-    },
-  });
+        }),
+        CHAIN_CONNECT_TIMEOUT_MS,
+        `connect to ${wsEndpoint}`,
+      );
+    } catch (error) {
+      lastError = error;
+      try {
+        if (provider) {
+          await withDeadline(
+            provider.disconnect(),
+            CHAIN_DISCONNECT_TIMEOUT_MS,
+            'provider disconnect',
+          );
+        }
+      } catch {
+        // Socket already closed; nothing to release.
+      }
+      logger.warn(
+        { wsEndpoint, error: errorMessage(error) },
+        'sn121: chain endpoint unavailable; trying next if configured',
+      );
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 };
 
 /**
@@ -155,13 +233,16 @@ export const resolveUids = async (
     return result;
   }
 
-  const wsEndpoint = cfg?.wsEndpoint?.trim() || DEFAULT_WS_ENDPOINT;
   const netuid = cfg?.netuid ?? DEFAULT_NETUID_121;
   const ss58Format = cfg?.ss58Format ?? DEFAULT_SS58_FORMAT;
 
-  const api = await createSubnetApi(wsEndpoint);
+  const api = await connectSubnetApi(resolveWsEndpoints(cfg?.wsEndpoint));
   try {
-    const metagraphResult = await api.call.subnetInfoRuntimeApi.getMetagraph(netuid);
+    const metagraphResult = await withDeadline(
+      api.call.subnetInfoRuntimeApi.getMetagraph(netuid),
+      CHAIN_READ_TIMEOUT_MS,
+      'read metagraph',
+    );
     const metagraphData = metagraphResult.toHuman() as Record<string, unknown> | null;
     const metagraphHotkeys = (metagraphData?.hotkeys as unknown[]) || [];
 
@@ -209,43 +290,96 @@ export const resolveUids = async (
     return result;
   } finally {
     try {
-      await api.disconnect();
+      await withDeadline(api.disconnect(), CHAIN_DISCONNECT_TIMEOUT_MS, 'disconnect');
     } catch (err) {
       logger.warn(
-        { err, errorMessage: err instanceof Error ? err.message : String(err) },
+        { err, errorMessage: errorMessage(err) },
         'sn121: error disconnecting metagraph api after resolveUids',
       );
     }
   }
 };
 
+/** Chain state the submit gate needs at startup. */
+export interface WeightsChainState {
+  /** Minimum blocks the chain requires between accepted setWeights extrinsics from one hotkey. */
+  rateLimitBlocks: number;
+  /** This hotkey's UID on the subnet, or null if not registered. */
+  uid: number | null;
+  /** Blocks since this hotkey last set weights, or null when unknown/never. */
+  blocksSinceLastUpdate: number | null;
+}
+
 /**
- * Read the subnet's `weightsSetRateLimit`: the minimum blocks the chain
- * requires between accepted setWeights extrinsics from one hotkey.
+ * Read the subnet's `weightsSetRateLimit` plus this hotkey's last weight-set
+ * block, so a restarted validator can rebuild its rate-limit anchor from the
+ * chain instead of submitting straight into a rejection.
  */
-export const fetchWeightsSetRateLimitBlocks = async (cfg?: {
+export const fetchWeightsChainState = async (cfg: {
+  hotkey: string;
   wsEndpoint?: string;
   netuid?: number;
-}): Promise<number> => {
-  const wsEndpoint = cfg?.wsEndpoint?.trim() || DEFAULT_WS_ENDPOINT;
-  const netuid = cfg?.netuid ?? DEFAULT_NETUID_121;
+}): Promise<WeightsChainState> => {
+  const netuid = cfg.netuid ?? DEFAULT_NETUID_121;
 
-  const api = await createSubnetApi(wsEndpoint);
+  const api = await connectSubnetApi(resolveWsEndpoints(cfg.wsEndpoint));
   try {
-    const raw = await api.query.subtensorModule.weightsSetRateLimit(netuid);
-    const blocks = Number(raw.toString());
-    if (!Number.isFinite(blocks) || blocks < 0) {
+    const raw = await withDeadline(
+      api.query.subtensorModule.weightsSetRateLimit(netuid),
+      CHAIN_READ_TIMEOUT_MS,
+      'read weightsSetRateLimit',
+    );
+    const rateLimitBlocks = Number(raw.toString());
+    if (!Number.isFinite(rateLimitBlocks) || rateLimitBlocks < 0) {
       throw new Error(`Unexpected weightsSetRateLimit value: ${raw.toString()}`);
     }
-    logger.debug({ netuid, blocks }, 'sn121: read weightsSetRateLimit from chain');
-    return blocks;
+
+    let uid: number | null = null;
+    let blocksSinceLastUpdate: number | null = null;
+    // Anchor recovery is best-effort: without it the gate falls back to submit feedback.
+    try {
+      const uidRaw = await withDeadline(
+        api.query.subtensorModule.uids(netuid, normalizeToSs58(cfg.hotkey)),
+        CHAIN_READ_TIMEOUT_MS,
+        'read uid for hotkey',
+      );
+      const uidJson = uidRaw.toJSON();
+      if (typeof uidJson === 'number') {
+        uid = uidJson;
+        const [lastUpdateRaw, header] = await Promise.all([
+          withDeadline(
+            api.query.subtensorModule.lastUpdate(netuid),
+            CHAIN_READ_TIMEOUT_MS,
+            'read lastUpdate',
+          ),
+          withDeadline(api.rpc.chain.getHeader(), CHAIN_READ_TIMEOUT_MS, 'read chain head'),
+        ]);
+        const lastUpdateBlocks = lastUpdateRaw.toJSON();
+        const lastBlock = Array.isArray(lastUpdateBlocks) ? lastUpdateBlocks[uid] : null;
+        const currentBlock = header.number.toNumber();
+        if (typeof lastBlock === 'number' && lastBlock > 0 && currentBlock >= lastBlock) {
+          blocksSinceLastUpdate = currentBlock - lastBlock;
+        }
+      }
+    } catch (error) {
+      logger.warn(
+        { error: errorMessage(error) },
+        'sn121: could not read last weight-set block; gate will rely on submit feedback',
+      );
+    }
+
+    logger.debug(
+      { netuid, rateLimitBlocks, uid, blocksSinceLastUpdate },
+      'sn121: read weights chain state',
+    );
+    return { rateLimitBlocks, uid, blocksSinceLastUpdate };
   } finally {
     try {
-      await api.disconnect();
+      await withDeadline(api.disconnect(), CHAIN_DISCONNECT_TIMEOUT_MS, 'disconnect');
     } catch (err) {
       logger.warn(
-        { err, errorMessage: err instanceof Error ? err.message : String(err) },
-        'sn121: error disconnecting api after weightsSetRateLimit read',
+        { err, errorMessage: errorMessage(err) },
+        'sn121: error disconnecting api after weights chain state read',
       );
     }
   }
@@ -371,7 +505,7 @@ export const submitSn121Weights = async (
   }
 
   // 3) Resolve configuration, falling back to safe defaults where possible.
-  const wsEndpoint = cfg.wsEndpoint?.trim() || DEFAULT_WS_ENDPOINT;
+  const wsEndpoints = resolveWsEndpoints(cfg.wsEndpoint);
   const netuid = cfg.netuid ?? DEFAULT_NETUID_121;
   const versionKey = cfg.versionKey ?? DEFAULT_VERSION_KEY;
   const ss58Format = cfg.ss58Format ?? DEFAULT_SS58_FORMAT;
@@ -379,13 +513,13 @@ export const submitSn121Weights = async (
 
   logger.debug(
     {
-      wsEndpoint,
+      wsEndpoints,
       netuid,
       versionKey,
       ss58Format,
       validatorSecretLength: validatorSecret.length,
       validatorSecretPrefix: validatorSecret.substring(0, 10) + '...',
-      usingDefaultWsEndpoint: !cfg.wsEndpoint,
+      usingDefaultWsEndpoint: !cfg.wsEndpoint && !process.env.BITTENSOR_WS_ENDPOINTS,
       usingDefaultNetuid: cfg.netuid === undefined,
       usingDefaultVersionKey: cfg.versionKey === undefined,
       usingDefaultSs58Format: cfg.ss58Format === undefined,
@@ -405,7 +539,7 @@ export const submitSn121Weights = async (
 
   logger.info(
     {
-      wsEndpoint,
+      wsEndpoints,
       netuid,
       versionKey,
       ss58Format,
@@ -426,7 +560,7 @@ export const submitSn121Weights = async (
   const apiStartTime = Date.now();
   // Create API with runtime definition for metagraph queries (shared helper
   // also waits for crypto and builds the WsProvider).
-  const api = await createSubnetApi(wsEndpoint);
+  const api = await connectSubnetApi(wsEndpoints);
   const apiReadyTime = Date.now() - apiStartTime;
   logger.info(
     {
@@ -489,7 +623,11 @@ export const submitSn121Weights = async (
     // Query the metagraph using runtime API to check if this account is a validator
     // In Bittensor, we can check the validatorPermit array for the subnet
     logger.debug('sn121: fetching metagraph via runtime API...');
-    const metagraphResult = await api.call.subnetInfoRuntimeApi.getMetagraph(netuid);
+    const metagraphResult = await withDeadline(
+      api.call.subnetInfoRuntimeApi.getMetagraph(netuid),
+      CHAIN_READ_TIMEOUT_MS,
+      'read metagraph for validator check',
+    );
     const metagraphData = metagraphResult.toHuman() as Record<string, unknown> | null;
 
     if (!metagraphData) {
@@ -712,9 +850,11 @@ export const submitSn121Weights = async (
   const submissionStartTime = Date.now();
   let inBlockTime: number | null = null;
   let finalizedTime: number | null = null;
+  // Ref object because TS control-flow analysis can't track assignment from inside the .then closure.
+  const unsubRef: { current: (() => void) | null } = { current: null };
 
   try {
-    await new Promise<void>((resolve, reject) => {
+    const submission = new Promise<void>((resolve, reject) => {
       extrinsic
         .signAndSend(account, (result: ISubmittableResult) => {
           const { status, dispatchError, events } = result;
@@ -816,6 +956,9 @@ export const submitSn121Weights = async (
             }
           }
         })
+        .then((unsub) => {
+          unsubRef.current = unsub;
+        })
         .catch((err: unknown) => {
           const errorTime = Date.now() - submissionStartTime;
           logger.error(
@@ -830,6 +973,8 @@ export const submitSn121Weights = async (
           reject(err);
         });
     });
+    // A subscription that goes quiet (e.g. finalization stalls) must fail the cycle, not wedge it.
+    await withDeadline(submission, CHAIN_SUBMIT_TIMEOUT_MS, 'setWeights inclusion + finalization');
   } catch (error) {
     const errorTime = Date.now() - submissionStartTime;
     logger.error(
@@ -842,11 +987,16 @@ export const submitSn121Weights = async (
     );
     throw error;
   } finally {
+    try {
+      unsubRef.current?.();
+    } catch {
+      // Subscription already torn down.
+    }
     // 9) Always disconnect the API client when we're done to avoid leaking sockets.
     logger.debug('sn121: disconnecting ApiPromise...');
     const disconnectStartTime = Date.now();
     try {
-      await api.disconnect();
+      await withDeadline(api.disconnect(), CHAIN_DISCONNECT_TIMEOUT_MS, 'disconnect');
       const disconnectTime = Date.now() - disconnectStartTime;
       logger.debug(
         {
