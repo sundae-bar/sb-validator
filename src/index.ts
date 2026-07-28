@@ -116,6 +116,7 @@ async function main(): Promise<void> {
     const shutdown = async (signal: string) => {
       logger.info({ signal }, 'Received shutdown signal');
       await validator.stop();
+      await flushMonitoring();
       process.exit(0);
     };
 

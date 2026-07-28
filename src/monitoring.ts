@@ -63,8 +63,10 @@ export const checkInWeightsMonitor = (intervalMinutes: number): void => {
     { monitorSlug: WEIGHTS_MONITOR_SLUG, status: 'ok' },
     {
       schedule: { type: 'interval', value: intervalMinutes, unit: 'minute' },
+      // Heartbeat check-ins only detect missed runs; alert on the first miss, resolve on the first ok.
       checkinMargin: intervalMinutes * 2,
-      maxRuntime: intervalMinutes,
+      failureIssueThreshold: 1,
+      recoveryThreshold: 1,
       timezone: 'Etc/UTC',
     },
   );
