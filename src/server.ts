@@ -39,7 +39,7 @@ export function createServer(validator: Validator): Express {
   });
 
   // Status endpoint with detailed info, including live dependency checks
-  // (sbevals sidecar, coordinator API, optional Letta backend)
+  // (sbevals sidecar, coordinator API)
   app.get('/status', async (req: Request, res: Response) => {
     const status = validator.getStatus();
     const report = await checkDependencies(status.apiUrl);
@@ -98,10 +98,6 @@ export function createServer(validator: Validator): Express {
           status: report.dependencies.coordinator.status,
           latencyMs: report.dependencies.coordinator.latencyMs,
         },
-        letta: {
-          status: report.dependencies.letta.status,
-          latencyMs: report.dependencies.letta.latencyMs,
-        },
       },
       uptime: process.uptime(),
       memory: {
@@ -159,7 +155,7 @@ export function createServer(validator: Validator): Express {
       version: packageVersion,
       endpoints: {
         health: '/health — process liveness only (used by container healthchecks)',
-        status: '/status — validator state + live dependency checks (sbevals, coordinator, letta)',
+        status: '/status — validator state + live dependency checks (sbevals, coordinator)',
         metrics: '/metrics — uptime, memory, task counts, dependency latencies',
         competition:
           "/competition — current competition + the validator's weight vote (targets, decision hash, last/next set time)",
@@ -167,7 +163,6 @@ export function createServer(validator: Validator): Express {
       dependencies: {
         sbevals: 'skill evaluation sidecar (required for skill challenges)',
         coordinator: 'Sundae Bar coordinator API (required)',
-        letta: 'legacy agent backend (optional, dormant)',
       },
     });
   });

@@ -62,11 +62,6 @@ if [ -z "${API_URL:-}" ]; then
     exit 1
 fi
 
-if [ -z "${LETTA_BASE_URL:-}" ]; then
-    error "LETTA_BASE_URL is not set"
-    exit 1
-fi
-
 # Build Docker image (no cache to ensure latest TypeScript changes are used)
 info "Building Docker image (no cache): $IMAGE_NAME"
 cd "$VALIDATOR_DIR"

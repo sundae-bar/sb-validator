@@ -99,16 +99,6 @@ async function main(): Promise<void> {
 
     initMonitoring(config.version);
 
-    // LETTA_BASE_URL is optional: skill challenges are evaluated by sb-evals over
-    // HTTP and never touch Letta. It is only needed for the dormant legacy agent
-    // (.af) track; when unset, that track is simply unavailable (skill-only mode).
-    if (process.env.LETTA_BASE_URL) {
-      const baseUrl = process.env.LETTA_BASE_URL.trim().replace(/^["']|["']$/g, '');
-      logger.info({ url: baseUrl }, 'Letta server configured (legacy agent track)');
-    } else {
-      logger.info('LETTA_BASE_URL not set — running skill-only (legacy agent track disabled)');
-    }
-
     // Create and start validator
     const validator = new Validator(config);
 

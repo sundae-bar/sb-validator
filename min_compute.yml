@@ -75,6 +75,6 @@ network_spec:
     # Additional network requirements:
     # - Stable internet connection required for API calls to:
     #   - Coordinator API (task polling, result submission)
-    #   - Letta server (agent execution)
+    #   - sbevals skill evaluation service (skill task execution)
     #   - Third-party model providers (OpenAI, Anthropic, etc.)
     #   - Bittensor network (weight submission, if enabled)
