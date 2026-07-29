@@ -5,12 +5,23 @@
 
 import axios from 'axios';
 import type { KeyringPair } from '@polkadot/keyring/types';
-import { getHotkey } from './signature';
 import logger from './logger';
+import type { TaskFailureReason } from './types';
 
 const SBEVALS_URL = (process.env.SBEVALS_URL || 'http://localhost:8090').replace(/\/$/, '');
 const SBEVALS_API_KEY = process.env.SBEVALS_API_KEY || '';
 const POLL_INTERVAL_MS = Number(process.env.SBEVALS_POLL_INTERVAL_SECONDS || '5') * 1000;
+
+// Error that carries the machine-readable failure cause alongside the message.
+export class SbevalsError extends Error {
+  readonly failureReason: TaskFailureReason;
+
+  constructor(message: string, failureReason: TaskFailureReason) {
+    super(message);
+    this.name = 'SbevalsError';
+    this.failureReason = failureReason;
+  }
+}
 
 /**
  * Submit a skill task to sb-evals via POST /evaluations.
@@ -24,24 +35,31 @@ export async function submitSkillTask(
 ): Promise<string> {
   logger.info({ taskId, url: `${SBEVALS_URL}/evaluations` }, 'Submitting skill task to sb-evals');
 
-  const response = await axios.post(
-    `${SBEVALS_URL}/evaluations`,
-    {
-      task_payload: taskPayload,
-    },
-    {
-      headers: {
-        'Content-Type': 'application/json',
-        'X-Api-Key': SBEVALS_API_KEY,
+  let response;
+  try {
+    response = await axios.post(
+      `${SBEVALS_URL}/evaluations`,
+      {
+        task_payload: taskPayload,
       },
-      timeout: 30000,
-    },
-  );
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Api-Key': SBEVALS_API_KEY,
+        },
+        timeout: 30000,
+      },
+    );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new SbevalsError(msg, 'evaluator_unreachable');
+  }
 
   const jobId = response.data?.jobId;
   if (!jobId)
-    throw new Error(
+    throw new SbevalsError(
       `sb-evals POST /evaluations returned no jobId: ${JSON.stringify(response.data)}`,
+      'evaluator_error',
     );
 
   logger.info({ taskId, jobId }, 'sb-evals job created');
@@ -64,12 +82,18 @@ export async function pollSkillResult(
   );
 
   while (Date.now() < deadline) {
-    const response = await axios.get(`${SBEVALS_URL}/evaluations/${jobId}`, {
-      headers: {
-        'X-Api-Key': SBEVALS_API_KEY,
-      },
-      timeout: 30000,
-    });
+    let response;
+    try {
+      response = await axios.get(`${SBEVALS_URL}/evaluations/${jobId}`, {
+        headers: {
+          'X-Api-Key': SBEVALS_API_KEY,
+        },
+        timeout: 30000,
+      });
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      throw new SbevalsError(msg, 'evaluator_unreachable');
+    }
 
     const { status, result, progress } = response.data;
     logger.debug({ jobId, status, progress }, 'sb-evals poll response');
@@ -80,11 +104,14 @@ export async function pollSkillResult(
     }
     if (status === 'failed') {
       const errorMsg = response.data.error || response.data.message || 'unknown error';
-      throw new Error(`sb-evals job ${jobId} failed: ${errorMsg}`);
+      throw new SbevalsError(`sb-evals job ${jobId} failed: ${errorMsg}`, 'evaluator_error');
     }
 
     await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
   }
 
-  throw new Error(`sb-evals polling timed out after ${timeoutMs}ms for job ${jobId}`);
+  throw new SbevalsError(
+    `sb-evals polling timed out after ${timeoutMs}ms for job ${jobId}`,
+    'evaluator_timeout',
+  );
 }

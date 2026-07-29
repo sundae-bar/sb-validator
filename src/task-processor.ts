@@ -10,8 +10,10 @@
 
 import * as fs from 'fs/promises';
 import * as path from 'path';
+import axios from 'axios';
 import logger from './logger';
 import { ApiClient } from './api-client';
+import { classifyFailureReason } from './failure-reason';
 import type { Task } from './types';
 import type { KeyringPair } from '@polkadot/keyring/types';
 import { submitSkillTask, pollSkillResult } from './sbevals-client';
@@ -133,7 +135,11 @@ export class TaskProcessor {
         const errorMessage = error instanceof Error ? error.message : String(error);
 
         // If task is already claimed/processing, that's okay (idempotent)
-        if (errorMessage.includes('already claimed') || errorMessage.includes('not available')) {
+        if (
+          (axios.isAxiosError(error) && error.response?.status === 409) ||
+          errorMessage.includes('already claimed') ||
+          errorMessage.includes('not available')
+        ) {
           logger.info({ taskId }, 'Task already claimed by another process, skipping');
           return;
         }
@@ -149,14 +155,14 @@ export class TaskProcessor {
         const message =
           'Task has no skill_file_path — the agent (.af) evaluation path has been removed; this validator only evaluates skill tasks';
         logger.warn({ taskId }, message);
-        await this.apiClient.submitResults(taskId, 'failed', {}, message);
+        await this.apiClient.submitResults(taskId, 'failed', {}, message, 'internal_error');
         return;
       }
 
       if (!this.pair) {
         const message = 'Validator keypair unavailable — cannot sign sbevals requests';
         logger.error({ taskId }, message);
-        await this.apiClient.submitResults(taskId, 'failed', {}, message);
+        await this.apiClient.submitResults(taskId, 'failed', {}, message, 'internal_error');
         return;
       }
 
@@ -178,6 +184,7 @@ export class TaskProcessor {
           'failed',
           {},
           error instanceof Error ? error.message : String(error),
+          classifyFailureReason(error),
         );
       } catch (submitError) {
         logger.error(
@@ -245,7 +252,7 @@ export class TaskProcessor {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       logger.error({ taskId, error: msg }, 'Failed to submit skill task to sb-evals');
-      await this.apiClient.submitResults(taskId, 'failed', {}, msg);
+      await this.apiClient.submitResults(taskId, 'failed', {}, msg, classifyFailureReason(error));
       return;
     }
 
@@ -255,7 +262,7 @@ export class TaskProcessor {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       logger.error({ taskId, jobId, error: msg }, 'sb-evals polling failed');
-      await this.apiClient.submitResults(taskId, 'failed', {}, msg);
+      await this.apiClient.submitResults(taskId, 'failed', {}, msg, classifyFailureReason(error));
       return;
     }
 
