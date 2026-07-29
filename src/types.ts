@@ -2,6 +2,14 @@
  * Type definitions for validator client
  */
 
+// Machine-readable failure cause sent alongside the human-readable error message.
+export type TaskFailureReason =
+  | 'evaluator_unreachable'
+  | 'evaluator_timeout'
+  | 'evaluator_error'
+  | 'coordinator_error'
+  | 'internal_error';
+
 export interface ValidatorConfig {
   mnemonic: string; // Required: mnemonic phrase for key pair
   apiUrl: string; // API base URL
@@ -22,32 +30,13 @@ export interface Task {
   evaluator_id?: string;
   task_payload: {
     task_id: string;
-    agent_file_path?: string; // URL, base64 encoded, or base64: prefixed string
     dataset_file_path?: string; // URL, base64 encoded dataset file, or base64: prefixed string
     suite_file_path: string; // URL, base64 encoded suite.yaml file, or base64: prefixed string (required)
     rubric_file_path?: string; // URL, base64 encoded, or base64: prefixed string
-    skill_file_path?: string; // URL to SKILL.md; if present → SBC9 skill submission
+    skill_file_path?: string; // URL to SKILL.md; absent only on stale tasks from the removed agent track
     skill_backup_file_path?: string; // Backup URL for SKILL.md
-    agent_backup_file_path?: string; // Backup URL for agent file
     priority?: number;
     metadata?: Record<string, unknown>;
-    // Legacy: suite_config is deprecated, use suite_file_path instead
-    suite_config?: {
-      name?: string;
-      dataset?: string;
-      max_samples?: number;
-      target?: {
-        kind?: string;
-        agent_file?: string;
-        base_url?: string;
-      };
-      graders?: Record<string, unknown>;
-      gate?: {
-        metric_key?: string;
-        op?: string;
-        value?: number;
-      };
-    };
   };
   status: string;
   created_at: string;

@@ -5,12 +5,35 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import type { KeyringPair } from '@polkadot/keyring/types';
 import { signRequest, getHotkey } from './signature';
-import { retry, retryWithCondition } from './retry';
+import { retryWithCondition } from './retry';
 import logger from './logger';
-import type { TaskResponse, RegistrationResponse, ClaimResponse, ResultResponse } from './types';
+import type {
+  TaskResponse,
+  RegistrationResponse,
+  ClaimResponse,
+  ResultResponse,
+  TaskFailureReason,
+} from './types';
 import type { ActiveCompetition } from './leaderboard';
 import FormData from 'form-data';
 import * as fs from 'fs';
+
+// failure_reason is only meaningful for failed results.
+export function buildResultPayload(
+  hotkey: string,
+  status: 'completed' | 'failed',
+  resultData: Record<string, unknown>,
+  errorMessage?: string,
+  failureReason?: TaskFailureReason,
+): Record<string, unknown> {
+  return {
+    hotkey,
+    status,
+    result_data: resultData,
+    ...(errorMessage ? { error_message: errorMessage } : {}),
+    ...(status === 'failed' && failureReason ? { failure_reason: failureReason } : {}),
+  };
+}
 
 export class ApiClient {
   private client: AxiosInstance;
@@ -285,6 +308,7 @@ export class ApiClient {
     status: 'completed' | 'failed',
     resultData: Record<string, unknown>,
     errorMessage?: string,
+    failureReason?: TaskFailureReason,
   ): Promise<ResultResponse> {
     logger.info(
       {
@@ -295,16 +319,18 @@ export class ApiClient {
         hasResults: !!resultData.results,
         resultsCount: Array.isArray(resultData.results) ? resultData.results.length : 0,
         errorMessage: errorMessage || undefined,
+        failureReason: failureReason || undefined,
       },
       'Submitting task results',
     );
 
-    const payload = {
-      hotkey: this.hotkey,
+    const payload = buildResultPayload(
+      this.hotkey,
       status,
-      result_data: resultData,
-      ...(errorMessage ? { error_message: errorMessage } : {}),
-    };
+      resultData,
+      errorMessage,
+      failureReason,
+    );
 
     try {
       const response = await this.signedRequest<ResultResponse>(
