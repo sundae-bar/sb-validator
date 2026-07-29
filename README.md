@@ -6,11 +6,11 @@ Secure validator client for the sundae_bar **SN121** subnet. This validator poll
 
 ## How challenges are evaluated
 
-The validator evaluates **skill challenges (`.md`)** by routing them to the in-house **`sbevals`** evaluator over HTTP. This is the active track and the only one you need to set up. `sbevals` runs the skill: it executes a test agent loaded with the submitted `SKILL.md` (making LLM calls to produce outputs) and then scores those outputs with LLM-as-judge graders.
+The validator evaluates **skill challenges (`.md`)** by routing them to the in-house **`sbevals`** evaluator over HTTP. `sbevals` runs the skill: it executes a test agent loaded with the submitted `SKILL.md` (making LLM calls to produce outputs) and then scores those outputs with LLM-as-judge graders.
 
 Routing is automatic. If a task carries a `skill_file_path` (a `SKILL.md`), the validator sends it to `sbevals` and polls for the result.
 
-> **Legacy agent track (`.af`):** an older agent track (Letta + the Python `letta-evals` runner) still exists in the codebase and ships with the default stack, but it is **dormant**: agent challenges have been retired in favour of skills. You do not need to set up, configure, or think about Letta to run a validator. It is kept only so the agent track can be brought back if we ever run agent challenges again.
+> **Removed agent track (`.af`):** earlier releases also shipped a Letta-based agent track (a Letta server, a pgvector database, and a Python `letta-evals` runner). Agent challenges were retired in favour of skills, and that stack has now been removed — the validator is skill-only, the Docker image no longer bundles Python, and the compose stack no longer includes the Letta services.
 
 ## Features
 
@@ -93,7 +93,7 @@ This **hotkey** is what you give the validator — as `VALIDATOR_MNEMONIC` (its 
 
 ## Quick Start
 
-Run the validator with the **unified Docker Compose** stack at the repo root. It starts the validator alongside the `sbevals` skill evaluator, so a single `docker compose up -d` gives you a working node. (The stack also brings up the dormant Letta backend for the legacy agent track; it needs no configuration from you. See [the note below](#about-the-dormant-letta-services).)
+Run the validator with the **unified Docker Compose** stack at the repo root. It starts the validator alongside the `sbevals` skill evaluator, so a single `docker compose up -d` gives you a working node.
 
 ### Steps
 
@@ -141,8 +141,7 @@ Run the validator with the **unified Docker Compose** stack at the repo root. It
 
 - **sbevals**: Skill evaluation service (`sundaebarai/sn121-skill-evals:latest`) on port 8090. This is what evaluates skill (`.md`) challenges. The validator reaches it at `http://sbevals:8090`.
 - **validator**: Validator service (`sundaebarai/sn121-validator:latest`) on port 8080 (health), automatically wired to `sbevals` (`SBEVALS_URL=http://sbevals:8090`).
-- **watchtower**: Auto-updater that keeps the `sn121-validator`, `sn121-sbevals`, and `sn121-letta` images current (polls every 5 minutes).
-- **letta-db** and **letta-server**: the dormant legacy agent backend. They start with default config and need no setup from you. See [the note below](#about-the-dormant-letta-services).
+- **watchtower**: Auto-updater that keeps the `sn121-validator` and `sn121-sbevals` images current (polls every 5 minutes).
 
 ### Network
 
@@ -151,9 +150,14 @@ All services run on the same Docker network and reach each other by service name
 - Validator → skill evaluator: `http://sbevals:8090`
 - No need for `host.docker.internal` when services share the compose file
 
-### About the dormant Letta services
+### Upgrading from a stack that included the Letta services
 
-The default compose still launches `letta-db` and `letta-server` for the retired agent (`.af`) track. You do not need to set them up, provide Letta keys, or point anything at them to evaluate skill challenges. They are retained only so the agent track can be reactivated later. If you prefer not to run them at all, you can remove the `letta-db` and `letta-server` services (and the validator's `depends_on: letta-server`) from your local `docker-compose.yaml`.
+Older compose files also ran `letta-db` and `letta-server` for the removed agent track. After updating `docker-compose.yaml`, apply the new stack and clean up the leftovers:
+
+```bash
+docker compose up -d --remove-orphans     # stops the removed letta containers
+docker volume rm sb-validator_letta-data sb-validator_postgres-data   # optional: reclaim disk (volume prefix = your compose project name)
+```
 
 ### Environment Variables
 
@@ -183,7 +187,7 @@ docker compose pull && docker compose up -d
 
 ### Building images
 
-The compose consumes the published images, so `docker compose build` does nothing. The `sundaebarai/sn121-validator`, `sundaebarai/sn121-skill-evals`, and `sundaebarai/letta` images are all pulled from Docker Hub. To build the validator image from source instead (maintainers):
+The compose consumes the published images, so `docker compose build` does nothing. The `sundaebarai/sn121-validator` and `sundaebarai/sn121-skill-evals` images are both pulled from Docker Hub. To build the validator image from source instead (maintainers):
 
 ```bash
 npm run docker:build     # multi-arch, tags :latest and :<package.json version>
@@ -211,8 +215,7 @@ npm run docker:push      # build and push to Docker Hub
 | `SBEVALS_URL` | No | `http://localhost:8090` | Skill evaluator base URL. The unified compose sets this to `http://sbevals:8090`. |
 | `SBEVALS_API_KEY` | Yes | - | Sent as `X-Api-Key` to `sbevals`. **Must equal the sidecar's `EVAL_SERVICE_API_KEY`.** Compose keeps them in sync. |
 | `SBEVALS_POLL_INTERVAL_SECONDS` | No | `5` | How often the validator polls `sbevals` for a job result. |
-| `LETTA_EMBEDDING_WAIT_MINUTES` | No | `30` | Skill-task timeout in minutes (how long the validator waits for an `sbevals` job to finish). The legacy name is kept for backwards compatibility. |
-| `LETTA_BASE_URL` | No | - | Optional. Legacy agent (`.af`) track only; unused for skill challenges. When unset, the validator runs skill-only. The compose sets it for the dormant Letta backend. |
+| `SBEVALS_RESULT_TIMEOUT_MINUTES` | No | `30` | Skill-task timeout in minutes (how long the validator waits for an `sbevals` job to finish). The legacy `LETTA_EMBEDDING_WAIT_MINUTES` name is honored as an alias. |
 | `SERVER_PORT` | No | `8080` | HTTP server port for health checks. |
 | `MAX_CONCURRENT_TASKS` | No | `1` | Maximum number of tasks to process concurrently. |
 | `KEEP_TASK_FILES` | No | - | Set to `1` to keep task files after processing (for debugging). |
@@ -273,8 +276,6 @@ graders:
 - `provider: google` → uses `GOOGLE_API_KEY`
 - `provider: together` → uses `TOGETHER_API_KEY` or `TOGETHERAI_API_KEY`
 
-> **Legacy:** the retired agent (`.af`) track ran the agent on a Letta server with model keys configured on that server. That path is dormant and needs no key setup to evaluate skill challenges.
-
 ## How It Works
 
 1. **Initialization**:
@@ -285,7 +286,7 @@ graders:
 2. **Task Processing**:
    - Polls the coordinator for queued tasks (`POST /api/v2/validators/tasks/poll`, with status + limit in the request body)
    - Claims the task
-   - **Evaluates the skill**: a skill task carries a `skill_file_path` (a `SKILL.md`), which the validator submits to `sbevals`, then polls for the result. (Tasks without a `skill_file_path` fall through to the dormant legacy agent path.)
+   - **Evaluates the skill**: a skill task carries a `skill_file_path` (a `SKILL.md`), which the validator submits to `sbevals`, then polls for the result. (Tasks without a `skill_file_path` are resolved as failed — they can only come from the removed agent track.)
    - Uploads the raw evaluation output to the coordinator (for inspection)
    - Submits the compact, scored result back to the coordinator
    - Continues polling at the configured interval
@@ -453,7 +454,6 @@ Example `/competition` response during an active competition:
 | --- | --- | --- |
 | `sbevals` | Yes | `GET {SBEVALS_URL}/health` with the `X-Api-Key` header. Distinguishes **unreachable** (container down / wrong URL), **unauthorized** (`SBEVALS_API_KEY` ≠ sidecar's `EVAL_SERVICE_API_KEY`), and **degraded** (reachable but `SBEVALS_API_KEY` unset). |
 | `coordinator` | Yes | Reachability of `API_URL`. Since coordinator endpoints require signed requests, authenticated health is reported separately via `validator.lastHeartbeat` and `validator.lastPoll` (timestamp, ok/error of the most recent signed heartbeat and task poll). |
-| `letta` | No | `GET {LETTA_BASE_URL}/v1/health`. Reported as `disabled` when `LETTA_BASE_URL` is unset (skill-only mode). |
 
 Possible per-dependency statuses: `ok`, `degraded`, `unauthorized`, `unreachable`, `error`, `disabled`. The top-level `status` is `degraded` unless the validator is running and every **required** dependency is `ok` — so a glance at `/status` tells you whether skill submissions can currently succeed.
 
@@ -496,13 +496,11 @@ Checks run in parallel with a 3s timeout (`DEPENDENCY_CHECK_TIMEOUT_MS`) and res
 - Verify `SBEVALS_URL` is reachable from the validator (in compose this is `http://sbevals:8090`)
 - A `401` usually means `SBEVALS_API_KEY` does not match the sidecar's `EVAL_SERVICE_API_KEY`. In the unified compose both come from the same `.env` value, so check for a stale `.env` or an override.
 - Check the sidecar logs: `docker compose logs -f sbevals`
-- "polling timed out" means the job did not finish within `LETTA_EMBEDDING_WAIT_MINUTES`; check the sbevals logs for a stuck or failing grader (harness or judge)
+- "polling timed out" means the job did not finish within `SBEVALS_RESULT_TIMEOUT_MINUTES`; check the sbevals logs for a stuck or failing grader (harness or judge)
 
 ### Missing or wrong model key
 
 - A grader failed because the `provider` in `suite.yaml` has no matching key set. Most skill challenges use Chutes or OpenRouter, so make sure `CHUTES_API_KEY` / `OPENROUTER_API_KEY` are set.
-
-> The dormant Letta services are not involved in skill evaluation. If you see Letta errors in the logs, they come from the unused legacy backend and do not affect skill challenges.
 
 ## Architecture
 

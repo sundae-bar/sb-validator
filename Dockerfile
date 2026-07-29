@@ -16,34 +16,6 @@ FROM node:20-bookworm-slim
 
 WORKDIR /app
 
-# System deps (python runtime for letta-evals)
-RUN apt-get update && \
-    apt-get install -y python3 python3-pip git && \
-    rm -rf /var/lib/apt/lists/*
-
-# Python packages (letta-evals, etc.)
-# Use --break-system-packages for Debian's PEP 668 restriction (safe in Docker)
-COPY requirements.lock ./
-RUN pip3 install --no-cache-dir --break-system-packages -r requirements.lock
-
-# Copy Python files
-COPY python/run_with_graders.py /app/python/run_with_graders.py
-COPY python/agent_design.py /app/python/agent_design.py
-COPY python/trajectory_graders.py /app/python/trajectory_graders.py
-COPY python/skill_evaluation.py /app/python/skill_evaluation.py
-COPY python/sample_variants.py /app/python/sample_variants.py
-COPY python/dataset_sbc9.jsonl /app/python/dataset_sbc9.jsonl
-
-# Set permissions
-RUN chmod +x /app/python/run_with_graders.py
-RUN chmod +x /app/python/agent_design.py
-RUN chmod +x /app/python/trajectory_graders.py
-RUN chmod +x /app/python/skill_evaluation.py
-RUN chmod +x /app/python/sample_variants.py
-
-# Set PYTHONPATH
-ENV PYTHONPATH=/app/python:$PYTHONPATH
-
 # Install only production Node deps
 COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
@@ -65,4 +37,3 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
   CMD node -e "require('http').get('http://localhost:8080/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1) })" || exit 1
 
 CMD ["node", "dist/index.js"]
-

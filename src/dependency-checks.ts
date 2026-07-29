@@ -3,7 +3,6 @@
  *
  * - sbevals      — the skill evaluation sidecar (required for skill challenges)
  * - coordinator  — the Sundae Bar coordinator API (required)
- * - letta        — the legacy agent (.af) backend (optional, dormant)
  *
  * Results are cached for a short TTL so /status and /metrics can be polled
  * frequently without hammering the dependencies themselves.
@@ -42,7 +41,6 @@ export interface DependencyReport {
   dependencies: {
     sbevals: DependencyCheck;
     coordinator: DependencyCheck;
-    letta: DependencyCheck;
   };
 }
 
@@ -156,42 +154,6 @@ async function checkCoordinator(apiUrl: string): Promise<DependencyCheck> {
   return check;
 }
 
-async function checkLetta(): Promise<DependencyCheck> {
-  const rawUrl = process.env.LETTA_BASE_URL;
-  if (!rawUrl) {
-    return {
-      name: 'letta',
-      description: 'Legacy agent (.af) backend. Optional — skill challenges never touch it.',
-      required: false,
-      url: null,
-      status: 'disabled',
-      latencyMs: null,
-      message: 'LETTA_BASE_URL not set — running skill-only (legacy agent track disabled)',
-    };
-  }
-
-  const baseUrl = rawUrl
-    .trim()
-    .replace(/^["']|["']$/g, '')
-    .replace(/\/$/, '');
-  const result = await probe(`${baseUrl}/v1/health`);
-
-  const check: DependencyCheck = {
-    name: 'letta',
-    description: 'Legacy agent (.af) backend. Optional — skill challenges never touch it.',
-    required: false,
-    url: baseUrl,
-    ...result,
-  };
-
-  if (check.status === 'unreachable') {
-    check.hint =
-      'Optional dependency. Check `docker compose logs -f letta-server` if the legacy agent track is needed.';
-  }
-
-  return check;
-}
-
 let cachedReport: DependencyReport | null = null;
 let cacheExpiresAt = 0;
 let inFlight: Promise<DependencyReport> | null = null;
@@ -211,13 +173,9 @@ export async function checkDependencies(apiUrl: string): Promise<DependencyRepor
   }
 
   inFlight = (async () => {
-    const [sbevals, coordinator, letta] = await Promise.all([
-      checkSbEvals(),
-      checkCoordinator(apiUrl),
-      checkLetta(),
-    ]);
+    const [sbevals, coordinator] = await Promise.all([checkSbEvals(), checkCoordinator(apiUrl)]);
 
-    const requiredOk = [sbevals, coordinator, letta]
+    const requiredOk = [sbevals, coordinator]
       .filter((d) => d.required)
       .every((d) => d.status === 'ok');
 
@@ -225,7 +183,7 @@ export async function checkDependencies(apiUrl: string): Promise<DependencyRepor
       overall: requiredOk ? 'ok' : 'degraded',
       checkedAt: new Date().toISOString(),
       cached: false,
-      dependencies: { sbevals, coordinator, letta },
+      dependencies: { sbevals, coordinator },
     };
 
     if (report.overall !== 'ok') {
