@@ -16,8 +16,10 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { setTimeout as setTimeoutPromise } from 'timers/promises';
 import * as yaml from 'js-yaml';
+import axios from 'axios';
 import logger from './logger';
 import { ApiClient } from './api-client';
+import { classifyFailureReason } from './failure-reason';
 import type { Task } from './types';
 import { LettaClient, type FileMetadata } from './letta-client';
 import type { KeyringPair } from '@polkadot/keyring/types';
@@ -156,16 +158,18 @@ export class TaskProcessor {
 
     try {
       // Step 1: Claim task (idempotent - if already claimed, will fail gracefully)
-      let claimed = false;
       try {
         await this.apiClient.claimTask(taskId);
-        claimed = true;
         logger.info({ taskId }, 'Task claimed successfully');
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
 
         // If task is already claimed/processing, that's okay (idempotent)
-        if (errorMessage.includes('already claimed') || errorMessage.includes('not available')) {
+        if (
+          (axios.isAxiosError(error) && error.response?.status === 409) ||
+          errorMessage.includes('already claimed') ||
+          errorMessage.includes('not available')
+        ) {
           logger.info({ taskId }, 'Task already claimed by another process, skipping');
           return;
         }
@@ -458,6 +462,7 @@ export class TaskProcessor {
           'failed',
           {},
           error instanceof Error ? error.message : String(error),
+          classifyFailureReason(error),
         );
       } catch (submitError) {
         logger.error(
@@ -517,7 +522,7 @@ export class TaskProcessor {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       logger.error({ taskId, error: msg }, 'Failed to submit skill task to sb-evals');
-      await this.apiClient.submitResults(taskId, 'failed', {}, msg);
+      await this.apiClient.submitResults(taskId, 'failed', {}, msg, classifyFailureReason(error));
       return;
     }
 
@@ -527,7 +532,7 @@ export class TaskProcessor {
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
       logger.error({ taskId, jobId, error: msg }, 'sb-evals polling failed');
-      await this.apiClient.submitResults(taskId, 'failed', {}, msg);
+      await this.apiClient.submitResults(taskId, 'failed', {}, msg, classifyFailureReason(error));
       return;
     }
 

@@ -2,6 +2,14 @@
  * Type definitions for validator client
  */
 
+// Machine-readable failure cause sent alongside the human-readable error message.
+export type TaskFailureReason =
+  | 'evaluator_unreachable'
+  | 'evaluator_timeout'
+  | 'evaluator_error'
+  | 'coordinator_error'
+  | 'internal_error';
+
 export interface ValidatorConfig {
   mnemonic: string; // Required: mnemonic phrase for key pair
   apiUrl: string; // API base URL
