@@ -11,6 +11,11 @@ import type { TaskFailureReason } from './types';
 const SBEVALS_URL = (process.env.SBEVALS_URL || 'http://localhost:8090').replace(/\/$/, '');
 const SBEVALS_API_KEY = process.env.SBEVALS_API_KEY || '';
 const POLL_INTERVAL_MS = Number(process.env.SBEVALS_POLL_INTERVAL_SECONDS || '5') * 1000;
+// Consecutive failed status polls at which the job is abandoned; transient
+// errors below this are retried so a blip cannot fail a long evaluation.
+const MAX_CONSECUTIVE_POLL_FAILURES = Number(
+  process.env.SBEVALS_POLL_MAX_CONSECUTIVE_FAILURES || '12',
+);
 
 // Error that carries the machine-readable failure cause alongside the message.
 export class SbevalsError extends Error {
@@ -66,6 +71,25 @@ export async function submitSkillTask(
   return jobId;
 }
 
+export type PollFailureAction = 'job_lost' | 'give_up' | 'retry';
+
+/**
+ * Decide how a failed status poll is handled. A 404 means the evaluator no
+ * longer knows the job, so the result can never arrive: fail immediately.
+ * Other errors are transient until they repeat maxConsecutiveFailures times
+ * in a row.
+ */
+export function classifyPollFailure(
+  error: unknown,
+  consecutiveFailures: number,
+  maxConsecutiveFailures: number,
+): PollFailureAction {
+  if (axios.isAxiosError(error) && error.response?.status === 404) {
+    return 'job_lost';
+  }
+  return consecutiveFailures >= maxConsecutiveFailures ? 'give_up' : 'retry';
+}
+
 /**
  * Poll sb-evals until the job completes or times out. Returns the result object.
  */
@@ -81,6 +105,8 @@ export async function pollSkillResult(
     'Polling sb-evals for skill result',
   );
 
+  let consecutiveFailures = 0;
+
   while (Date.now() < deadline) {
     let response;
     try {
@@ -90,9 +116,31 @@ export async function pollSkillResult(
         },
         timeout: 30000,
       });
+      consecutiveFailures = 0;
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
-      throw new SbevalsError(msg, 'evaluator_unreachable');
+      consecutiveFailures += 1;
+      const action = classifyPollFailure(error, consecutiveFailures, MAX_CONSECUTIVE_POLL_FAILURES);
+
+      if (action === 'job_lost') {
+        throw new SbevalsError(
+          `sb-evals no longer has job ${jobId}; the evaluator likely restarted mid-evaluation`,
+          'evaluator_job_lost',
+        );
+      }
+      if (action === 'give_up') {
+        throw new SbevalsError(
+          `sb-evals unreachable for ${consecutiveFailures} consecutive status polls of job ${jobId}: ${msg}`,
+          'evaluator_unreachable',
+        );
+      }
+
+      logger.warn(
+        { jobId, consecutiveFailures, error: msg },
+        'sb-evals status poll failed, retrying',
+      );
+      await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+      continue;
     }
 
     const { status, result, progress } = response.data;
