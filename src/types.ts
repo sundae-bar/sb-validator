@@ -7,6 +7,7 @@ export type TaskFailureReason =
   | 'evaluator_unreachable'
   | 'evaluator_timeout'
   | 'evaluator_error'
+  | 'evaluator_job_lost'
   | 'coordinator_error'
   | 'internal_error';
 

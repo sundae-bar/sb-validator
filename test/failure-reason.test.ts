@@ -19,6 +19,7 @@ test('classifyFailureReason maps SbevalsError reasons through', () => {
     'evaluator_unreachable',
     'evaluator_timeout',
     'evaluator_error',
+    'evaluator_job_lost',
   ];
   for (const reason of reasons) {
     assert.equal(classifyFailureReason(new SbevalsError('msg', reason)), reason);
