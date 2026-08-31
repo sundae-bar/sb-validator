@@ -19,7 +19,7 @@ import {
   DEFAULT_WEIGHTS_RATE_LIMIT_BLOCKS,
   type BittensorWeightTarget,
 } from './weights';
-import { selectCurrentLeader, type LeaderboardEntry } from './leaderboard';
+import { resolveLeader, type LeaderboardEntry } from './leaderboard';
 import { computeBurnWeights, getEmissionsPercent, BURN_UID } from './weight-policy';
 import { computeWeightDecisionHash } from './integrity';
 import { captureError, captureAlert, checkInWeightsMonitor } from './monitoring';
@@ -283,7 +283,19 @@ export class Validator {
           if (this.cycleAbandoned(epoch, reason)) {
             break;
           }
-          const leader = selectCurrentLeader(comp);
+          const leader = resolveLeader(comp);
+          if (
+            comp?.current_leader &&
+            leader?.miner_hotkey !== comp.current_leader.miner_hotkey
+          ) {
+            logger.warn(
+              {
+                announced: comp.current_leader.miner_hotkey,
+                elected: leader?.miner_hotkey ?? null,
+              },
+              'Coordinator-resolved leader failed verification; using local election',
+            );
+          }
 
           let leaderSs58: string | null = null;
           let winnerUid: number | null = null;

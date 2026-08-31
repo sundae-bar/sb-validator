@@ -2,7 +2,7 @@
  * Dry-run the local weight DECISION without touching the network or the chain.
  *
  * Feeds a mock (or file-provided) ActiveCompetition through the exact pure
- * functions the validator uses — selectCurrentLeader + computeBurnWeights — and
+ * functions the validator uses — resolveLeader + computeBurnWeights — and
  * prints the winner and the weight targets. This lets you eyeball the decision
  * logic (winner selection, EMISSIONS_PERCENT split, burn-to-UID-0 fallbacks)
  * end-to-end without a coordinator or a validator key.
@@ -19,7 +19,7 @@
  */
 
 import * as fs from 'fs';
-import { selectCurrentLeader, type ActiveCompetition } from '../src/leaderboard';
+import { resolveLeader, type ActiveCompetition } from '../src/leaderboard';
 import { computeBurnWeights, getEmissionsPercent, BURN_UID } from '../src/weight-policy';
 
 const SAMPLE: ActiveCompetition = {
@@ -55,7 +55,7 @@ const main = (): void => {
   }
 
   const emissionsPercent = getEmissionsPercent();
-  const leader = selectCurrentLeader(comp);
+  const leader = resolveLeader(comp);
 
   // Placeholder UID for the winning hotkey (real resolution needs the chain).
   const PLACEHOLDER_WINNER_UID = 42;
