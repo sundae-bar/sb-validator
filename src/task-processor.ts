@@ -17,6 +17,7 @@ import { classifyFailureReason } from './failure-reason';
 import type { Task } from './types';
 import type { KeyringPair } from '@polkadot/keyring/types';
 import { submitSkillTask, pollSkillResult } from './sbevals-client';
+import { extractReferencesRead, extractSkillBundle } from './skill-bundle-result';
 import { getHotkey } from './signature';
 import { normalizeToSs58 } from './weights';
 import { computeIntegrityHash } from './integrity';
@@ -295,6 +296,7 @@ export class TaskProcessor {
             if (!resultData) return null;
             const grade = resultData.grade as { score?: number; rationale?: string } | undefined;
             const performance = resultData.performance as { total_tokens?: number } | undefined;
+            const referencesRead = extractReferencesRead(resultData.performance);
             const id = resultObj.id ?? resultObj.sample_id ?? resultObj.task_id;
             const perSampleScore =
               typeof resultData.weighted_score === 'number'
@@ -330,6 +332,8 @@ export class TaskProcessor {
               grades_by_key: gradesByKey,
               tokens:
                 typeof performance?.total_tokens === 'number' ? performance.total_tokens : null,
+              // Skill bundles only: which reference files the agent read on this sample.
+              ...(referencesRead ? { references_read: referencesRead } : {}),
               input: null,
               domain: null,
               skill: null,
@@ -427,6 +431,10 @@ export class TaskProcessor {
       );
     }
 
+    // Present only when the task carried reference files AND the evaluator
+    // understood them. The coordinator refuses a bundle result without it.
+    const skillBundle = extractSkillBundle(evaluationResult);
+
     const compactPayload = {
       results: compactResults,
       score: finalScore,
@@ -434,6 +442,7 @@ export class TaskProcessor {
       duration_seconds: evaluationResult?.duration_seconds ?? null,
       total_tokens: totalTokens,
       timestamp,
+      ...(skillBundle ? { skill_bundle: skillBundle } : {}),
       ...(integrity ?? {}),
     };
 
