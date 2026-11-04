@@ -312,13 +312,21 @@ export class TaskProcessor {
                 ? Object.fromEntries(
                     Object.entries(rawGrades).flatMap(([key, g]) => {
                       if (typeof g !== 'object' || g === null) return [];
-                      const gg = g as { score?: unknown; rationale?: unknown };
+                      const gg = g as { score?: unknown; rationale?: unknown; feedback?: unknown };
                       return [
                         [
                           key,
                           {
                             score: typeof gg.score === 'number' ? gg.score : null,
                             rationale: typeof gg.rationale === 'string' ? gg.rationale : null,
+                            // sb_evals >= 1.0.39: the quality judges' miner-facing
+                            // note (why this score, in rubric terms). The coordinator
+                            // keeps it visible while a sealed challenge withholds the
+                            // rationale. Absent on older evaluators and when the
+                            // evaluator's leak guard dropped it.
+                            ...(typeof gg.feedback === 'string' && gg.feedback
+                              ? { feedback: gg.feedback }
+                              : {}),
                           },
                         ],
                       ];
