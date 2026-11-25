@@ -91,6 +91,12 @@ Set this up once with `btcli`, following Bittensor's own guides (use **netuid 12
 
 This **hotkey** is what you give the validator — as `VALIDATOR_MNEMONIC` (its mnemonic), `HOTKEY_PATH` (the file at `~/.bittensor/wallets/<wallet>/hotkeys/<hotkey>`), or `PRIVATE_KEY`. The same key authenticates the coordinator API calls **and** signs the on-chain `setWeights` extrinsic — there is no separate weight-signing key. At weight-submission time the validator checks the metagraph and refuses if the hotkey isn't registered or lacks a permit.
 
+### Scoring is approved separately from registering
+
+Registering with the coordinator proves the hotkey holds a validator permit. **Scoring submissions is a separate right that sundae_bar grants per validator** (`scoring_approved` on the coordinator's validator record). Until it is granted, the validator registers and heartbeats normally but polls an empty task queue; the poll response says so (`scoring_approved: false` with a message), and result and raw-output uploads answer `403 SCORING_NOT_APPROVED`. Approval takes effect at the **next Challenge activation**: the set of scoring validators is frozen per Challenge when it goes live, so every submission in a Challenge is judged by the same validators. Revoking approval takes effect at once.
+
+Why: a scoring validator receives each Challenge's sealed reference set (see [How It Works](#how-it-works)), averages one-for-one into every submission's score, and therefore into the on-chain weights. A validator permit is a stake rank, not vetting. Setting weights needs no approval: the leaderboard read (`GET /api/v2/validators/competitions/active`) is open to any signed hotkey. To be approved for scoring, ask in the SN121 Discord; a new registration also alerts the operator.
+
 ## Quick Start
 
 Run the validator with the **unified Docker Compose** stack at the repo root. It starts the validator alongside the `sbevals` skill evaluator, so a single `docker compose up -d` gives you a working node.
@@ -284,10 +290,11 @@ graders:
    - Starts the heartbeat loop
    - Starts the weights submission loop (if configured)
 2. **Task Processing**:
-   - Polls the coordinator for queued tasks (`POST /api/v2/validators/tasks/poll`, with status + limit in the request body)
+   - Polls the coordinator for queued tasks (`POST /api/v2/validators/tasks/poll`, with status + limit in the request body). Only validators approved for scoring receive tasks (see [Prerequisites](#scoring-is-approved-separately-from-registering)).
    - Claims the task
    - **Evaluates the skill**: a skill task carries a `skill_file_path` (a `SKILL.md`), which the validator submits to `sbevals`, then polls for the result. (Tasks without a `skill_file_path` are resolved as failed — they can only come from the removed agent track.)
-   - Uploads the raw evaluation output to the coordinator (for inspection)
+   - **Sealed reference set.** For a Challenge with a sealed dataset, the `dataset_file_path` in a polled or claimed task is a **signed URL** to the full reference set (inputs plus `ground_truth`), minted when the task is served and valid for a few hours (coordinator setting, default 4h). The public `dataset.jsonl` miners download holds the inputs only; the sealed file's sha256 is on the challenge record, and the file is published when the Challenge closes. `sbevals` fetches the URL like any other reference; nothing in this validator inspects it. Treat the fetched file as confidential while the Challenge is open: it is the grading key.
+   - Uploads the raw evaluation output to the coordinator (for inspection). While the Challenge is sealed the coordinator keeps it private and publishes it at close, together with the judges' rationales.
    - Submits the compact, scored result back to the coordinator
    - Continues polling at the configured interval
 3. **Heartbeat**:
@@ -474,6 +481,8 @@ Checks run in parallel with a 3s timeout (`DEPENDENCY_CHECK_TIMEOUT_MS`) and res
 - Check network connectivity
 
 ### "No tasks available"
+
+- If the poll response carries `scoring_approved: false`, the hotkey is registered but not yet approved for scoring; it will not receive tasks until sundae_bar approves it, from the next Challenge activation onward (see [Prerequisites](#scoring-is-approved-separately-from-registering)).
 
 - This is normal — the validator will keep polling
 - Make sure submissions are being processed on the coordinator
