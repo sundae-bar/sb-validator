@@ -20,8 +20,14 @@ import {
   type BittensorWeightTarget,
 } from './weights';
 import { resolveLeader, type LeaderboardEntry } from './leaderboard';
-import { computeBurnWeights, getEmissionsPercent, BURN_UID } from './weight-policy';
-import { computeWeightDecisionHash } from './integrity';
+import {
+  computeBurnWeights,
+  getEmissionsPercent,
+  getPlatformFee,
+  BURN_UID,
+  type PlatformFee,
+} from './weight-policy';
+import { computeWeightDecisionHash, type WeightDecisionInput } from './integrity';
 import { captureError, captureAlert, checkInWeightsMonitor } from './monitoring';
 
 /**
@@ -41,6 +47,8 @@ export interface WeightDecisionSnapshot {
   leader: LeaderboardEntry | null;
   winnerUid: number | null;
   emissionsPercent: number;
+  /** Platform fee applied this cycle; null when off or skipped. */
+  platformFee: WeightDecisionInput['platform_fee'];
   targets: BittensorWeightTarget[] | null;
   decisionHash: string | null;
   submitted: boolean;
@@ -284,10 +292,7 @@ export class Validator {
             break;
           }
           const leader = resolveLeader(comp);
-          if (
-            comp?.current_leader &&
-            leader?.miner_hotkey !== comp.current_leader.miner_hotkey
-          ) {
+          if (comp?.current_leader && leader?.miner_hotkey !== comp.current_leader.miner_hotkey) {
             logger.warn(
               {
                 announced: comp.current_leader.miner_hotkey,
@@ -297,22 +302,65 @@ export class Validator {
             );
           }
 
+          const feeConfig = getPlatformFee();
+          if (process.env.TAKE_PLATFORM_FEE?.trim().toLowerCase() === 'true' && !feeConfig) {
+            logger.warn(
+              'TAKE_PLATFORM_FEE=true but PLATFORM_FEE_HOTKEY is missing/invalid or PLATFORM_FEE_PERCENT is 0; no platform fee taken',
+            );
+          }
+
+          // One metagraph read resolves the winner and the fee hotkey. Both
+          // are addressed by hotkey because UIDs are recycled on deregistration.
           let leaderSs58: string | null = null;
           let winnerUid: number | null = null;
+          let platformFee: PlatformFee | null = null;
           if (leader) {
             leaderSs58 = normalizeToSs58(leader.miner_hotkey);
-            const uidMap = await resolveUids([leaderSs58]);
+            const uidMap = await resolveUids(
+              feeConfig ? [leaderSs58, feeConfig.hotkey] : [leaderSs58],
+            );
             winnerUid = uidMap.get(leaderSs58) ?? null;
+            if (feeConfig) {
+              const feeUid = uidMap.get(feeConfig.hotkey);
+              if (feeUid === undefined) {
+                logger.warn(
+                  { feeHotkey: feeConfig.hotkey },
+                  'Platform fee hotkey is not registered on the subnet; no platform fee taken this cycle',
+                );
+              } else {
+                platformFee = { uid: feeUid, percent: feeConfig.percent };
+              }
+            }
           }
 
           const emissionsPercent = getEmissionsPercent();
-          const targets: BittensorWeightTarget[] = computeBurnWeights(winnerUid, emissionsPercent);
+          const targets: BittensorWeightTarget[] = computeBurnWeights(
+            winnerUid,
+            emissionsPercent,
+            platformFee,
+          );
+          // The fee enters the hash only when it changed the vector, so a fee
+          // that computeBurnWeights treated as a no-op (fee on the winner or
+          // the burn UID, or nothing to take it from) hashes like no fee.
+          const feeUid = platformFee?.uid ?? null;
+          const feeApplied =
+            feeConfig !== null &&
+            platformFee !== null &&
+            feeUid !== null &&
+            feeUid !== winnerUid &&
+            feeUid !== BURN_UID &&
+            targets.some((t) => t.uid === feeUid);
+          const appliedFee: WeightDecisionInput['platform_fee'] =
+            feeApplied && feeConfig && platformFee
+              ? { hotkey: feeConfig.hotkey, uid: platformFee.uid, percent: platformFee.percent }
+              : null;
           const decisionHash = computeWeightDecisionHash({
             competition_id: comp?.competition_id ?? null,
             leader_hotkey: leaderSs58,
             leader_score: leader?.best_score ?? null,
             winner_uid: winnerUid,
             emissions_percent: emissionsPercent,
+            platform_fee: appliedFee,
             targets,
           });
 
@@ -330,6 +378,7 @@ export class Validator {
             leader,
             winnerUid,
             emissionsPercent,
+            platformFee: appliedFee,
             targets,
             decisionHash,
             submitted: false,
@@ -348,6 +397,7 @@ export class Validator {
               leaderScore: leader?.best_score ?? null,
               winnerUid,
               emissionsPercent,
+              platformFee: appliedFee,
               burnUid: BURN_UID,
               targets,
               decisionHash,
@@ -456,6 +506,7 @@ export class Validator {
               leader: null,
               winnerUid: null,
               emissionsPercent: getEmissionsPercent(),
+              platformFee: null,
               targets: null,
               decisionHash: null,
               submitted: false,

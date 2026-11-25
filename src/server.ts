@@ -126,6 +126,7 @@ export function createServer(validator: Validator): Express {
               winnerUid: d.winnerUid,
               leader: d.leader,
               emissionsPercent: d.emissionsPercent,
+              platformFee: d.platformFee,
               decisionHash: d.decisionHash,
             }
           : null,

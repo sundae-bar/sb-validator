@@ -97,6 +97,12 @@ export interface WeightDecisionInput {
   leader_score: number | null;
   winner_uid: number | null;
   emissions_percent: number;
+  /**
+   * The platform fee applied this cycle; null when it is off or was skipped.
+   * Covered by the hash so two validators that disagree on the fee produce
+   * different hashes instead of silently different weights.
+   */
+  platform_fee: { hotkey: string; uid: number; percent: number } | null;
   targets: { uid: number; weight: number }[];
 }
 
@@ -111,6 +117,13 @@ export const computeWeightDecisionHash = (input: WeightDecisionInput): string =>
     leader_score: input.leader_score,
     winner_uid: input.winner_uid,
     emissions_percent: input.emissions_percent,
+    platform_fee: input.platform_fee
+      ? {
+          hotkey: input.platform_fee.hotkey,
+          uid: input.platform_fee.uid,
+          percent: input.platform_fee.percent,
+        }
+      : null,
     targets: input.targets.map((t) => ({ uid: t.uid, weight: t.weight })),
   });
   const hex = createHash('sha256').update(canonical, 'utf8').digest('hex');
