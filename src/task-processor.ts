@@ -15,6 +15,7 @@ import logger from './logger';
 import { ApiClient } from './api-client';
 import { classifyFailureReason } from './failure-reason';
 import type { Task } from './types';
+import { parseTaskPayment, verifyTaskPayment } from './payment-verifier';
 import type { KeyringPair } from '@polkadot/keyring/types';
 import { submitSkillTask, pollSkillResult } from './sbevals-client';
 import { extractReferencesRead, extractSkillBundle } from './skill-bundle-result';
@@ -160,6 +161,13 @@ export class TaskProcessor {
         return;
       }
 
+      // Step 3: the submission fee. Checked before any evaluator time is
+      // spent; a task that fails here never reaches sb-evals, and the
+      // coordinator keeps the hash consumed so the miner must pay again.
+      if (!(await this.checkPayment(taskId, taskPayload))) {
+        return;
+      }
+
       if (!this.pair) {
         const message = 'Validator keypair unavailable — cannot sign sbevals requests';
         logger.error({ taskId }, message);
@@ -223,6 +231,55 @@ export class TaskProcessor {
 
       // Unmark processing (in-memory)
       this.unmarkProcessing(taskId);
+    }
+  }
+
+  /**
+   * Verify the task's TAO payment on chain. Returns true when evaluation may
+   * proceed. On a bad payment, reports the task failed and returns false.
+   *
+   * Tasks with no payment block predate the fee and pass, unless
+   * REQUIRE_SUBMISSION_PAYMENT=true.
+   */
+  private async checkPayment(taskId: string, taskPayload: Task['task_payload']): Promise<boolean> {
+    const payment = parseTaskPayment(taskPayload.metadata);
+    if (!payment) {
+      if (process.env.REQUIRE_SUBMISSION_PAYMENT === 'true') {
+        await this.apiClient.submitResults(
+          taskId,
+          'failed',
+          {},
+          'Task carries no payment and this validator requires one',
+          'payment_invalid',
+        );
+        return false;
+      }
+      logger.debug(
+        { taskId },
+        'Task has no payment block (pre-fee submission), skipping payment check',
+      );
+      return true;
+    }
+
+    try {
+      const verdict = await verifyTaskPayment(payment);
+      if (verdict.ok) {
+        return true;
+      }
+      logger.warn(
+        { taskId, txHash: payment.tx_hash, reason: verdict.message },
+        'Submission payment rejected',
+      );
+      await this.apiClient.submitResults(taskId, 'failed', {}, verdict.message, 'payment_invalid');
+      return false;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error(
+        { taskId, txHash: payment.tx_hash, error: message },
+        'Could not verify submission payment',
+      );
+      await this.apiClient.submitResults(taskId, 'failed', {}, message, 'payment_unverifiable');
+      return false;
     }
   }
 

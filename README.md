@@ -220,6 +220,10 @@ npm run docker:push      # build and push to Docker Hub
 | `MAX_CONCURRENT_TASKS` | No | `1` | Maximum number of tasks to process concurrently. |
 | `KEEP_TASK_FILES` | No | - | Set to `1` to keep task files after processing (for debugging). |
 | `EMISSIONS_PERCENT` | No | `0.2` | Share of weight paid to the current #1 miner; the rest is burned to UID 0 (`0.2` = 20% to the leader, 80% burned). |
+| `TAKE_PLATFORM_FEE` | No | `false` | Set to `true` to give the platform a cut of the winning miner's share. Needs `PLATFORM_FEE_HOTKEY`. |
+| `PLATFORM_FEE_HOTKEY` | With fee | - | SS58 hotkey that receives the platform fee, resolved to a UID from the metagraph every cycle. If unset, invalid or not registered, no fee is taken. |
+| `PLATFORM_FEE_PERCENT` | No | `0.2` | Fraction of the miner's share (`EMISSIONS_PERCENT`) kept by the platform. With defaults: leader 16%, platform 4%, burn 80%. |
+| `REQUIRE_SUBMISSION_PAYMENT` | No | `false` | Fail tasks that carry no payment block. Tasks that predate the TAO submission fee have none. |
 | `BITTENSOR_WEIGHTS_INTERVAL_MINUTES` | No | `30` | Interval for recomputing and submitting weights (minutes). Also recomputed immediately when a newly scored submission changes the standings. |
 | `BITTENSOR_WEIGHTS_DISABLED` | No | `false` | Set to `true` to disable on-chain weight submission (still computes and logs the target weights as a dry run). |
 | `CHUTES_API_KEY` | No | - | Chutes provider key. Used by most skill challenges. |
@@ -325,7 +329,7 @@ decentralization: the coordinator is a **data source**, not the arbiter of emiss
 - Pulls the active competition + leaderboard from the coordinator (`GET /api/v2/validators/competitions/active`) — read-only **data**, not a weight verdict.
 - Deterministically selects the current **#1 miner by score** (ties broken by earliest submission, then hotkey). The selection is pure and reproducible, so any validator running this code derives the same winner from the same data.
 - Resolves the winner's hotkey → metagraph UID on subnet 121 (via the `getMetagraph` runtime API).
-- Builds the weight vector: **`EMISSIONS_PERCENT` to the winner's UID, the remainder to UID 0 (burn)**. If there is no active competition or no eligible/resolvable winner, 100% is burned to UID 0.
+- Builds the weight vector: **`EMISSIONS_PERCENT` to the winner's UID, the remainder to UID 0 (burn)**. With `TAKE_PLATFORM_FEE=true`, `PLATFORM_FEE_PERCENT` of the winner's share moves to the UID of `PLATFORM_FEE_HOTKEY`, and the fee is part of the decision hash. If there is no active competition or no eligible/resolvable winner, 100% is burned to UID 0.
 - Validates that the validator account is registered on subnet 121 and holds a validator permit.
 - Converts the float weights to integers scaled to sum to `10000` (range-checked against the u16 max of 65535) and submits on-chain via the Polkadot API (`setWeights` on finney, netuid 121).
 
@@ -351,6 +355,10 @@ docker run --rm \
 ```
 
 > The chain endpoint (`wss://entrypoint-finney.opentensor.ai:443`) and netuid (`121`) are hardcoded — there are no env vars for them.
+
+### Submission payments
+
+Every submission pays a TAO fee (0.05 TAO by default, set by the coordinator). The coordinator verifies the transfer on chain before it accepts the upload, then sends the transaction hash, block hash, payer, destination and amount in the task metadata. The validator is the second line: before any evaluation it checks on chain that the extrinsic is a successful plain `balances` transfer in a finalized, canonical block, sent from the submitting wallet to the fee wallet, for at least the amount. A bad payment fails the task with `payment_invalid`. A chain outage, or a node that does not yet know or has not finalized the block, fails it with `payment_unverifiable`, which the coordinator treats as an infrastructure failure. The coordinator keeps each hash on one evaluation, so a paid submission that is rejected or fails for an infrastructure reason can reuse its payment.
 
 ## Security
 
