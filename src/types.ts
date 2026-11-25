@@ -9,6 +9,8 @@ export type TaskFailureReason =
   | 'evaluator_error'
   | 'evaluator_job_lost'
   | 'coordinator_error'
+  | 'payment_invalid'
+  | 'payment_unverifiable'
   | 'internal_error';
 
 export interface ValidatorConfig {

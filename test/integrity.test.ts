@@ -62,6 +62,7 @@ const baseDecision: WeightDecisionInput = {
   leader_score: 0.91,
   winner_uid: 42,
   emissions_percent: 0.2,
+  platform_fee: null,
   targets: [
     { uid: 42, weight: 0.2 },
     { uid: 0, weight: 0.8 },
@@ -95,6 +96,38 @@ test('computeWeightDecisionHash changes when any field changes', () => {
   );
 });
 
+test('computeWeightDecisionHash covers the platform fee', () => {
+  const base = computeWeightDecisionHash(baseDecision);
+  const withFee: WeightDecisionInput = {
+    ...baseDecision,
+    platform_fee: { hotkey: '5Ffee', uid: 3, percent: 0.2 },
+    targets: [
+      { uid: 42, weight: 0.16 },
+      { uid: 3, weight: 0.04 },
+      { uid: 0, weight: 0.8 },
+    ],
+  };
+  const feeHash = computeWeightDecisionHash(withFee);
+  assert.notEqual(base, feeHash);
+  // Same vector, different fee description: still a different hash.
+  assert.notEqual(
+    feeHash,
+    computeWeightDecisionHash({
+      ...withFee,
+      platform_fee: { hotkey: '5Ffee', uid: 3, percent: 0.25 },
+    }),
+  );
+  assert.notEqual(
+    feeHash,
+    computeWeightDecisionHash({
+      ...withFee,
+      platform_fee: { hotkey: '5Fother', uid: 3, percent: 0.2 },
+    }),
+  );
+  // Stable across calls.
+  assert.equal(feeHash, computeWeightDecisionHash({ ...withFee }));
+});
+
 test('computeWeightDecisionHash handles the burn-only decision', () => {
   const burn = computeWeightDecisionHash({
     competition_id: null,
@@ -102,6 +135,7 @@ test('computeWeightDecisionHash handles the burn-only decision', () => {
     leader_score: null,
     winner_uid: null,
     emissions_percent: 0.2,
+    platform_fee: null,
     targets: [{ uid: 0, weight: 1 }],
   });
   assert.match(burn, /^sha256:[0-9a-f]{64}$/);
