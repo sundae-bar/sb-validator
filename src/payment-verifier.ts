@@ -153,27 +153,40 @@ export class PaymentUnverifiableError extends Error {
   }
 }
 
-const connect = async (): Promise<ApiPromise> => {
+/**
+ * A node that keeps full state. Reading the events of a block needs that
+ * block's state, and a pruning node discards it after a few hundred blocks
+ * (about an hour), so a payment made while the task queue was deep cannot be
+ * read from such a node. The archive node is always tried last.
+ */
+const ARCHIVE_WS_ENDPOINT = 'wss://archive.chain.opentensor.ai:443';
+
+/**
+ * Endpoints the payment check reads from, in order: `PAYMENT_WS_ENDPOINTS`
+ * when set, otherwise the weight-setting endpoints, with the archive node
+ * appended when it is not already listed.
+ */
+export const resolvePaymentWsEndpoints = (): string[] => {
+  const override = process.env.PAYMENT_WS_ENDPOINTS?.trim();
+  const list = override ? resolveWsEndpoints(override) : resolveWsEndpoints();
+  return list.includes(ARCHIVE_WS_ENDPOINT) ? list : [...list, ARCHIVE_WS_ENDPOINT];
+};
+
+const connect = async (endpoint: string): Promise<ApiPromise> => {
   await cryptoWaitReady();
-  let lastError: unknown = new Error('no chain endpoints configured');
-  for (const endpoint of resolveWsEndpoints()) {
-    const provider = new WsProvider(endpoint);
-    try {
-      return await withDeadline(
-        ApiPromise.create({ provider, throwOnConnect: true, noInitWarn: true }),
-        CHAIN_CONNECT_TIMEOUT_MS,
-        `connect to ${endpoint}`,
-      );
-    } catch (error) {
-      lastError = error;
-      await withDeadline(provider.disconnect(), CHAIN_DISCONNECT_TIMEOUT_MS, 'disconnect').catch(
-        () => undefined,
-      );
-    }
+  const provider = new WsProvider(endpoint);
+  try {
+    return await withDeadline(
+      ApiPromise.create({ provider, throwOnConnect: true, noInitWarn: true }),
+      CHAIN_CONNECT_TIMEOUT_MS,
+      `connect to ${endpoint}`,
+    );
+  } catch (error) {
+    await withDeadline(provider.disconnect(), CHAIN_DISCONNECT_TIMEOUT_MS, 'disconnect').catch(
+      () => undefined,
+    );
+    throw error;
   }
-  throw new PaymentUnverifiableError(
-    `Could not reach the chain: ${lastError instanceof Error ? lastError.message : String(lastError)}`,
-  );
 };
 
 const addressOf = (arg: unknown): string | null => {
@@ -297,25 +310,38 @@ export const verifyTaskPayment = async (payment: TaskPayment): Promise<PaymentVe
     return { ok: false, message: 'Payment has no block hash' };
   }
 
-  const api = await connect();
-  try {
-    const observed = await fetchObservedTransfer(api, payment);
-    const verdict = judgeTransfer(observed, payment);
-    logger.info(
-      { txHash: payment.tx_hash, blockHash: payment.block_hash, ok: verdict.ok },
-      verdict.ok ? 'Payment verified on chain' : `Payment rejected: ${verdict.message}`,
-    );
-    return verdict;
-  } catch (error) {
-    if (error instanceof PaymentUnverifiableError) {
-      throw error;
+  // Each endpoint gets the whole read. A node that cannot be reached, or no
+  // longer holds the block's state, is not a verdict on the payment: the next
+  // endpoint is asked, and the archive node comes last.
+  const failures: string[] = [];
+  for (const endpoint of resolvePaymentWsEndpoints()) {
+    let api: ApiPromise;
+    try {
+      api = await connect(endpoint);
+    } catch (error) {
+      failures.push(`${endpoint}: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
     }
-    throw new PaymentUnverifiableError(
-      `Chain read failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  } finally {
-    await withDeadline(api.disconnect(), CHAIN_DISCONNECT_TIMEOUT_MS, 'disconnect').catch(
-      () => undefined,
-    );
+    try {
+      const observed = await fetchObservedTransfer(api, payment);
+      const verdict = judgeTransfer(observed, payment);
+      logger.info(
+        { txHash: payment.tx_hash, blockHash: payment.block_hash, endpoint, ok: verdict.ok },
+        verdict.ok ? 'Payment verified on chain' : `Payment rejected: ${verdict.message}`,
+      );
+      return verdict;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(`${endpoint}: ${message}`);
+      logger.warn(
+        { txHash: payment.tx_hash, blockHash: payment.block_hash, endpoint, error: message },
+        'Payment could not be read from this endpoint; trying the next',
+      );
+    } finally {
+      await withDeadline(api.disconnect(), CHAIN_DISCONNECT_TIMEOUT_MS, 'disconnect').catch(
+        () => undefined,
+      );
+    }
   }
+  throw new PaymentUnverifiableError(`Chain read failed on every endpoint: ${failures.join('; ')}`);
 };
