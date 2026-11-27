@@ -223,6 +223,7 @@ npm run docker:push      # build and push to Docker Hub
 | `TAKE_PLATFORM_FEE` | No | `false` | Set to `true` to give the platform a cut of the winning miner's share. Needs `PLATFORM_FEE_HOTKEY`. |
 | `PLATFORM_FEE_HOTKEY` | With fee | - | SS58 hotkey that receives the platform fee, resolved to a UID from the metagraph every cycle. If unset, invalid or not registered, no fee is taken. |
 | `PLATFORM_FEE_PERCENT` | No | `0.2` | Fraction of the miner's share (`EMISSIONS_PERCENT`) kept by the platform. With defaults: leader 16%, platform 4%, burn 80%. |
+| `PAYMENT_WS_ENDPOINTS` | No | `BITTENSOR_WS_ENDPOINTS` + archive node | Comma-separated chain endpoints the payment check reads from, in order. |
 | `REQUIRE_SUBMISSION_PAYMENT` | No | `false` | Fail tasks that carry no payment block. Tasks that predate the TAO submission fee have none. |
 | `BITTENSOR_WEIGHTS_INTERVAL_MINUTES` | No | `30` | Interval for recomputing and submitting weights (minutes). Also recomputed immediately when a newly scored submission changes the standings. |
 | `BITTENSOR_WEIGHTS_DISABLED` | No | `false` | Set to `true` to disable on-chain weight submission (still computes and logs the target weights as a dry run). |
@@ -358,7 +359,7 @@ docker run --rm \
 
 ### Submission payments
 
-Every submission pays a TAO fee (0.05 TAO by default, set by the coordinator). The coordinator verifies the transfer on chain before it accepts the upload, then sends the transaction hash, block hash, payer, destination and amount in the task metadata. The validator is the second line: before any evaluation it checks on chain that the extrinsic is a successful plain `balances` transfer in a finalized, canonical block, sent from the submitting wallet to the fee wallet, for at least the amount. A bad payment fails the task with `payment_invalid`. A chain outage, or a node that does not yet know or has not finalized the block, fails it with `payment_unverifiable`, which the coordinator treats as an infrastructure failure. The coordinator keeps each hash on one evaluation, so a paid submission that is rejected or fails for an infrastructure reason can reuse its payment.
+Every submission pays a TAO fee (0.05 TAO by default, set by the coordinator). The coordinator verifies the transfer on chain before it accepts the upload, then sends the transaction hash, block hash, payer, destination and amount in the task metadata. The validator is the second line: before any evaluation it checks on chain that the extrinsic is a successful plain `balances` transfer in a finalized, canonical block, sent from the submitting wallet to the fee wallet, for at least the amount. A bad payment fails the task with `payment_invalid`. The check tries each of `PAYMENT_WS_ENDPOINTS` in turn (default: `BITTENSOR_WS_ENDPOINTS` with the archive node `wss://archive.chain.opentensor.ai:443` appended), because reading a block's events needs that block's state and a pruning node discards it after about an hour. A chain outage, or a node that does not yet know or has not finalized the block, fails it with `payment_unverifiable`, which the coordinator treats as an infrastructure failure. The coordinator keeps each hash on one evaluation, so a paid submission that is rejected or fails for an infrastructure reason can reuse its payment.
 
 ## Security
 
